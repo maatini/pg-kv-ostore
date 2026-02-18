@@ -187,7 +187,7 @@ Die Konfiguration erfolgt über `application.properties` oder Umgebungsvariablen
 
 | Property | Umgebungsvariable | Standard | Beschreibung |
 |----------|-------------------|----------|--------------|
-| `quarkus.datasource.jdbc.url` | `DB_HOST`, `DB_PORT`, `DB_NAME` | localhost:5432/kvstore | Datenbankverbindung |
+| `quarkus.datasource.reactive.url` | `DB_URL` | localhost:5432/kvstore | Datenbankverbindung (Reactive) |
 | `quarkus.datasource.username` | `DB_USERNAME` | postgres | Datenbank-Benutzer |
 | `quarkus.datasource.password` | `DB_PASSWORD` | postgres | Datenbank-Passwort |
 | `kv.max-value-size` | `KV_MAX_VALUE_SIZE` | 1048576 (1MB) | Max. Wertgröße in Bytes |
@@ -225,11 +225,21 @@ Der Service wurde einem Lasttest (1000 Operationen, Concurrency 20) unterzogen, 
 
 > [!NOTE]
 > Die Ergebnisse können je nach Hardware und Datenbankkonfiguration (z.B. SSD vs. HDD, Netzwerk-Latenz) variieren. Der reaktive Stack ermöglicht jedoch eine effiziente Nutzung der Ressourcen bei hoher Nebenläufigkeit.
+>
+> **WRITE RESULTS:**
+> Total Time: 1132 ms
+> Throughput: 883,39 ops/sec
+> Avg Latency: 1,13 ms/op
+>
+> **READ RESULTS:**
+> Total Time: 275 ms
+> Throughput: 3636,36 ops/sec
+> Avg Latency: 0,28 ms/op
 
 | Operation | Durchsatz (ops/sec) | Latenz (ms/op) |
 |-----------|----------------------|----------------|
-| **Write** | ~880                 | ~1.13          |
-| **Read**  | ~3600                | ~0.28          |
+| **Write** | 883.39               | 1.13           |
+| **Read**  | 3636.36              | 0.28           |
 
 *Getestet auf lokaler Hardware mit PostgreSQL 16 (reaktiver Treiber).*
 

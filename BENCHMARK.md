@@ -47,12 +47,12 @@ Die Ergebnisse werden im Terminal ausgegeben:
 
 ```text
 WRITE RESULTS:
-Total Time: ... ms
-Throughput: ... ops/sec
-Avg Latency: ... ms/op
+Total Time: 1132 ms
+Throughput: 883,39 ops/sec
+Avg Latency: 1,13 ms/op
 
 READ RESULTS:
-Total Time: ... ms
-Throughput: ... ops/sec
-Avg Latency: ... ms/op
+Total Time: 275 ms
+Throughput: 3636,36 ops/sec
+Avg Latency: 0,28 ms/op
 ```
