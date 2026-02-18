@@ -15,6 +15,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import io.quarkus.test.security.TestSecurity;
+
 @QuarkusTest
 public class SimpleBenchmarkTest {
 
@@ -30,6 +32,7 @@ public class SimpleBenchmarkTest {
     private static final int CONCURRENCY = 20;
 
     @Test
+    @TestSecurity(user = "admin", roles = { "admin" })
     public void benchmark() throws Exception {
         System.out.println("Starting Benchmark...");
         System.out.println("Operations: " + NUM_OPERATIONS);
@@ -102,10 +105,12 @@ public class SimpleBenchmarkTest {
                 .build();
 
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 201 && response.statusCode() != 409) { // 409 if exists
-            System.err.println("Failed to create bucket: " + response.statusCode() + " " + response.body());
+        if (response.statusCode() != 201 && response.statusCode() != 200 && response.statusCode() != 409) {
+            System.err.println("CRITICAL: Failed to create bucket for benchmark! Status: " + response.statusCode()
+                    + " Body: " + response.body());
+            throw new RuntimeException("Bucket creation failed");
         } else {
-            System.out.println("Bucket created (or already exists).");
+            System.out.println("Bucket ready for benchmark.");
         }
     }
 

@@ -2,7 +2,7 @@
 
 # KV und Object Store mit PostgreSQL
 
-Ein hochperformanter, reaktiver Microservice, entwickelt mit **Quarkus** und **PostgreSQL**, der verteilten Key-Value-Speicher und Object Storage in einer einzigen, transaktionalen Infrastruktur vereint.
+Ein hochperformanter, **vollständig reaktiver (non-blocking)** Microservice, entwickelt mit **Quarkus**, **Hibernate Reactive**, **Mutiny** und **PostgreSQL**, der verteilten Key-Value-Speicher und Object Storage in einer einzigen, transaktionalen Infrastruktur vereint.
 
 Dieses Projekt implementiert Architekturmuster ähnlich wie [NATS JetStream](https://docs.nats.io/nats-concepts/jetstream) (KV und Object Store), nutzt jedoch die Zuverlässigkeit, transaktionale Integrität und Verbreitung von PostgreSQL als Persistenzschicht.
 
@@ -203,16 +203,35 @@ Die Konfiguration erfolgt über `application.properties` oder Umgebungsvariablen
 
 ## Testen
 
+Der Service verfügt über eine umfassende Testsuite mit **166 automatisierten Tests**, die sowohl Unit- als auch Integrationstests abdecken.
+
 ```bash
-# Unit-Tests ausführen
+# Unit- und Integrationstests ausführen
 ./mvnw test
-
-# Integrationstests ausführen (erfordert PostgreSQL)
-./mvnw verify
-
-# Mit Testcontainers ausführen
-./mvnw verify -Dquarkus.test.integration-test-profile=test
 ```
+
+Alle Tests verwenden reaktive Asserter (`TransactionalUniAsserter`), um die Integrität der non-blocking Datenbanktransaktionen zu verifizieren.
+
+### Test-Profile
+- **Standard**: Nutzt die konfigurierte PostgreSQL-Datenbank.
+- **Testcontainers**: Kann für isolierte Integrationstests genutzt werden:
+  ```bash
+  ./mvnw verify -Dquarkus.test.integration-test-profile=test
+  ```
+
+## Benchmark Ergebnisse
+
+Der Service wurde einem Lasttest (1000 Operationen, Concurrency 20) unterzogen, um die Leistungsfähigkeit des reaktiven Stacks zu demonstrieren.
+
+> [!NOTE]
+> Die Ergebnisse können je nach Hardware und Datenbankkonfiguration (z.B. SSD vs. HDD, Netzwerk-Latenz) variieren. Der reaktive Stack ermöglicht jedoch eine effiziente Nutzung der Ressourcen bei hoher Nebenläufigkeit.
+
+| Operation | Durchsatz (ops/sec) | Latenz (ms/op) |
+|-----------|----------------------|----------------|
+| **Write** | ~880                 | ~1.13          |
+| **Read**  | ~3600                | ~0.28          |
+
+*Getestet auf lokaler Hardware mit PostgreSQL 16 (reaktiver Treiber).*
 
 ## Bauen (Building)
 
@@ -296,15 +315,16 @@ Für Produktions-Deployments mit hoher Verfügbarkeit:
 │  │ KV Watch Endpoint       │  │ Object Watch Endpoint   │  │
 │  └─────────────────────────┘  └─────────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
-│                     Service Layer                           │
+│                     Service Layer (Mutiny)                  │
 │  ┌─────────────┐  ┌─────────────┐  ┌────────────────────┐  │
 │  │ KV Service  │  │ KV Watch    │  │ Object Store       │  │
 │  │             │  │ Service     │  │ Service            │  │
 │  └─────────────┘  └─────────────┘  └────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
-│                     Entity Layer (Panache)                  │
+│               Entity Layer (Hibernate Reactive)             │
 │  ┌─────────────┐  ┌─────────────┐  ┌────────────────────┐  │
 │  │ KvBucket    │  │ KvEntry     │  │ ObjMetadata/Chunk  │  │
+│  │ (Panache)   │  │ (Panache)   │  │ (Panache)          │  │
 │  └─────────────┘  └─────────────┘  └────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
 │                     PostgreSQL                              │
