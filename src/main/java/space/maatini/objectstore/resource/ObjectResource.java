@@ -76,23 +76,23 @@ public class ObjectResource {
                         @Parameter(description = "Object name") @PathParam("name") String name) {
 
                 return objectStoreService.getMetadata(bucket, name)
-                                .map(metadata -> {
-                                        Multi<byte[]> dataStream = objectStoreService.getObjectChunks(bucket, name)
-                                                        .onItem().transform(chunk -> chunk.data);
+                                .flatMap(metadata -> objectStoreService.getObjectData(bucket, name)
+                                                .map(data -> {
+                                                        Response.ResponseBuilder response = Response.ok(data)
+                                                                        .header("Content-Length", metadata.size)
+                                                                        .header("Content-Disposition",
+                                                                                        "attachment; filename=\"" + name
+                                                                                                        + "\"")
+                                                                        .header("X-Object-Digest", metadata.digest)
+                                                                        .header("X-Object-Digest-Algorithm",
+                                                                                        metadata.digestAlgorithm);
 
-                                        Response.ResponseBuilder response = Response.ok(dataStream)
-                                                        .header("Content-Length", metadata.size)
-                                                        .header("Content-Disposition",
-                                                                        "attachment; filename=\"" + name + "\"")
-                                                        .header("X-Object-Digest", metadata.digest)
-                                                        .header("X-Object-Digest-Algorithm", metadata.digestAlgorithm);
+                                                        if (metadata.contentType != null) {
+                                                                response.header("Content-Type", metadata.contentType);
+                                                        }
 
-                                        if (metadata.contentType != null) {
-                                                response.header("Content-Type", metadata.contentType);
-                                        }
-
-                                        return response.build();
-                                });
+                                                        return response.build();
+                                                }));
         }
 
         @PUT
@@ -111,7 +111,7 @@ public class ObjectResource {
                         @Parameter(description = "Object name") @PathParam("name") String name,
                         @HeaderParam("Content-Type") String contentType,
                         @HeaderParam("X-Object-Description") String description,
-                        Multi<byte[]> data) {
+                        byte[] data) {
 
                 // Collect custom headers
                 Map<String, String> headers = new HashMap<>();
@@ -120,7 +120,8 @@ public class ObjectResource {
                 }
                 // Could add more custom header handling here
 
-                return objectStoreService.putObject(bucket, name, data, contentType, description, headers)
+                Multi<byte[]> dataStream = Multi.createFrom().item(data);
+                return objectStoreService.putObject(bucket, name, dataStream, contentType, description, headers)
                                 .map(metadata -> ObjMetadataDto.Response.from(metadata, bucket));
         }
 

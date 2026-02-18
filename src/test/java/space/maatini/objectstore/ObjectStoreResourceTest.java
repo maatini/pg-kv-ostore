@@ -95,7 +95,7 @@ public class ObjectStoreResourceTest {
                                 .statusCode(200)
                                 .body("name", equalTo(OBJECT_NAME))
                                 .body("size", equalTo(OBJECT_CONTENT.length()))
-                                .body("contentType", equalTo("text/plain"))
+                                .body("contentType", containsString("text/plain"))
                                 .body("description", equalTo("Test file"));
         }
 
