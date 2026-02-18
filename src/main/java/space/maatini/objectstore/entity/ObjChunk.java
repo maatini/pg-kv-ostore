@@ -1,6 +1,7 @@
 package space.maatini.objectstore.entity;
 
-import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
+import io.quarkus.hibernate.reactive.panache.PanacheEntityBase;
+import io.smallrye.mutiny.Uni;
 import jakarta.persistence.*;
 import java.util.List;
 import java.util.UUID;
@@ -39,15 +40,15 @@ public class ObjChunk extends PanacheEntityBase {
     public String digest;
 
     // Panache Finder Methods
-    public static List<ObjChunk> findByMetadataOrdered(UUID metadataId) {
+    public static Uni<List<ObjChunk>> findByMetadataOrdered(UUID metadataId) {
         return list("metadataId = ?1 ORDER BY chunkIndex ASC", metadataId);
     }
 
-    public static ObjChunk findByMetadataAndIndex(UUID metadataId, int chunkIndex) {
+    public static Uni<ObjChunk> findByMetadataAndIndex(UUID metadataId, int chunkIndex) {
         return find("metadataId = ?1 AND chunkIndex = ?2", metadataId, chunkIndex).firstResult();
     }
 
-    public static long deleteByMetadata(UUID metadataId) {
+    public static Uni<Long> deleteByMetadata(UUID metadataId) {
         return delete("metadataId", metadataId);
     }
 }

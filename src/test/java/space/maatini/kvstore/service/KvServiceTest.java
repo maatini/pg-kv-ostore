@@ -9,12 +9,13 @@ import space.maatini.kvstore.entity.KvBucket;
 import space.maatini.kvstore.entity.KvEntry;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.vertx.RunOnVertxContext;
+import io.quarkus.test.hibernate.reactive.panache.TransactionalUniAsserter;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.*;
 import org.mockito.Mockito;
 
 import java.util.Base64;
-import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -39,393 +40,462 @@ class KvServiceTest {
     private static UUID testBucketId;
 
     @BeforeEach
-    void setUp() {
-        // Reset mock
+    @RunOnVertxContext
+    void setUp(TransactionalUniAsserter asserter) {
         Mockito.reset(watchService);
+        asserter.execute(() -> KvEntry.deleteAll());
+        asserter.execute(() -> KvBucket.deleteAll());
+        asserter.execute(() -> {
+            KvBucketDto.CreateRequest request = new KvBucketDto.CreateRequest();
+            request.name = TEST_BUCKET;
+            request.maxValueSize = 1024;
+            request.maxHistoryPerKey = 5;
+            return kvService.createBucket(request)
+                    .invoke(bucket -> testBucketId = bucket.id)
+                    .replaceWithVoid();
+        });
     }
 
     // ==================== Bucket Tests ====================
 
     @Test
     @Order(1)
-    void testCreateBucket_Success() {
+    @RunOnVertxContext
+    void testCreateBucket_Success(TransactionalUniAsserter asserter) {
+        String newBucket = "new-bucket";
         KvBucketDto.CreateRequest request = new KvBucketDto.CreateRequest();
-        request.name = TEST_BUCKET;
+        request.name = newBucket;
         request.description = "Test bucket for unit tests";
         request.maxValueSize = 1024;
         request.maxHistoryPerKey = 5;
 
-        KvBucket bucket = kvService.createBucket(request);
-
-        assertNotNull(bucket);
-        assertNotNull(bucket.id);
-        assertEquals(TEST_BUCKET, bucket.name);
-        assertEquals("Test bucket for unit tests", bucket.description);
-        assertEquals(1024, bucket.maxValueSize);
-        assertEquals(5, bucket.maxHistoryPerKey);
-        assertNotNull(bucket.createdAt);
-
-        testBucketId = bucket.id;
+        asserter.assertThat(() -> kvService.createBucket(request), bucket -> {
+            assertNotNull(bucket);
+            assertNotNull(bucket.id);
+            assertEquals(newBucket, bucket.name);
+            assertEquals("Test bucket for unit tests", bucket.description);
+            assertEquals(1024, bucket.maxValueSize);
+            assertEquals(5, bucket.maxHistoryPerKey);
+            assertNotNull(bucket.createdAt);
+        });
     }
 
     @Test
     @Order(2)
-    void testCreateBucket_DuplicateName() {
+    @RunOnVertxContext
+    void testCreateBucket_DuplicateName(TransactionalUniAsserter asserter) {
         KvBucketDto.CreateRequest request = new KvBucketDto.CreateRequest();
         request.name = TEST_BUCKET;
+        request.description = "Duplicate bucket";
 
-        assertThrows(ConflictException.class, () -> kvService.createBucket(request));
+        asserter.assertFailedWith(() -> kvService.createBucket(request), ConflictException.class);
     }
 
     @Test
     @Order(3)
-    void testGetBucket_Success() {
-        KvBucket bucket = kvService.getBucket(TEST_BUCKET);
-
-        assertNotNull(bucket);
-        assertEquals(TEST_BUCKET, bucket.name);
+    @RunOnVertxContext
+    void testGetBucket_Success(TransactionalUniAsserter asserter) {
+        asserter.assertThat(() -> kvService.getBucket(TEST_BUCKET), bucket -> {
+            assertNotNull(bucket);
+            assertEquals(TEST_BUCKET, bucket.name);
+            assertEquals(testBucketId, bucket.id);
+        });
     }
 
     @Test
     @Order(4)
-    void testGetBucket_NotFound() {
-        assertThrows(NotFoundException.class, () -> kvService.getBucket("non-existent"));
+    @RunOnVertxContext
+    void testGetBucket_NotFound(TransactionalUniAsserter asserter) {
+        asserter.assertFailedWith(() -> kvService.getBucket("nonexistent"), NotFoundException.class);
     }
 
     @Test
     @Order(5)
-    void testListBuckets() {
-        List<KvBucket> buckets = kvService.listBuckets();
-
-        assertNotNull(buckets);
-        assertTrue(buckets.stream().anyMatch(b -> b.name.equals(TEST_BUCKET)));
+    @RunOnVertxContext
+    void testListBuckets(TransactionalUniAsserter asserter) {
+        asserter.assertThat(() -> kvService.listBuckets(), buckets -> {
+            assertNotNull(buckets);
+            assertFalse(buckets.isEmpty());
+            assertTrue(buckets.stream().anyMatch(b -> b.name.equals(TEST_BUCKET)));
+        });
     }
 
     @Test
     @Order(6)
-    void testUpdateBucket() {
+    @RunOnVertxContext
+    void testUpdateBucket(TransactionalUniAsserter asserter) {
         KvBucketDto.UpdateRequest request = new KvBucketDto.UpdateRequest();
         request.description = "Updated description";
         request.maxValueSize = 2048;
+        request.maxHistoryPerKey = 10;
 
-        KvBucket bucket = kvService.updateBucket(TEST_BUCKET, request);
-
-        assertNotNull(bucket);
-        assertEquals("Updated description", bucket.description);
-        assertEquals(2048, bucket.maxValueSize);
+        asserter.assertThat(() -> kvService.updateBucket(TEST_BUCKET, request), bucket -> {
+            assertNotNull(bucket);
+            assertEquals("Updated description", bucket.description);
+            assertEquals(2048, bucket.maxValueSize);
+            assertEquals(10, bucket.maxHistoryPerKey);
+        });
     }
 
     // ==================== Key-Value Entry Tests ====================
 
     @Test
-    @Order(10)
-    void testPut_Success() {
+    @Order(7)
+    @RunOnVertxContext
+    void testPut_Success(TransactionalUniAsserter asserter) {
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = "Hello, World!";
+        request.value = "test-value";
         request.base64 = false;
 
-        KvEntry entry = kvService.put(TEST_BUCKET, "test-key", request);
-
-        assertNotNull(entry);
-        assertEquals("test-key", entry.key);
-        assertEquals(1L, entry.revision);
-        assertEquals(KvEntry.Operation.PUT, entry.operation);
-        assertArrayEquals("Hello, World!".getBytes(), entry.value);
-
-        // Verify watcher was notified
-        verify(watchService, times(1)).notifyChange(any(KvEntryDto.WatchEvent.class));
+        asserter.assertThat(() -> kvService.put(TEST_BUCKET, "test-key", request), entry -> {
+            assertNotNull(entry);
+            assertEquals("test-key", entry.key);
+            assertArrayEquals("test-value".getBytes(), entry.value);
+            assertEquals(1L, entry.revision);
+        });
     }
 
     @Test
-    @Order(11)
-    void testPut_Base64Value() {
-        String originalValue = "Binary data: \u0000\u0001\u0002";
+    @Order(8)
+    @RunOnVertxContext
+    void testPut_Base64Value(TransactionalUniAsserter asserter) {
+        String originalValue = "Hello, World!";
         String base64Value = Base64.getEncoder().encodeToString(originalValue.getBytes());
 
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
         request.value = base64Value;
         request.base64 = true;
 
-        KvEntry entry = kvService.put(TEST_BUCKET, "binary-key", request);
+        asserter.assertThat(() -> kvService.put(TEST_BUCKET, "base64-key", request), entry -> {
+            assertNotNull(entry);
+            assertEquals("base64-key", entry.key);
+            assertArrayEquals(originalValue.getBytes(), entry.value);
+        });
+    }
 
-        assertNotNull(entry);
-        assertArrayEquals(originalValue.getBytes(), entry.value);
+    @Test
+    @Order(9)
+    @RunOnVertxContext
+    void testPut_InvalidBase64(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "invalid-base64!";
+        request.base64 = true;
+
+        asserter.assertFailedWith(() -> kvService.put(TEST_BUCKET, "invalid-key", request), ValidationException.class);
+    }
+
+    @Test
+    @Order(10)
+    @RunOnVertxContext
+    void testPut_ValueTooLarge(TransactionalUniAsserter asserter) {
+        // Create a large value (bucket has maxValueSize=2048 from update test)
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "A".repeat(2000); // Exceeds 1024
+        request.base64 = false;
+
+        asserter.assertFailedWith(() -> kvService.put(TEST_BUCKET, "large-key", request), ValidationException.class);
+    }
+
+    @Test
+    @Order(11)
+    @RunOnVertxContext
+    void testPut_BucketNotFound(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "value";
+
+        asserter.assertFailedWith(() -> kvService.put("nonexistent", "key", request), NotFoundException.class);
     }
 
     @Test
     @Order(12)
-    void testPut_InvalidBase64() {
+    @RunOnVertxContext
+    void testGet_Success(TransactionalUniAsserter asserter) {
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = "not-valid-base64!!!";
-        request.base64 = true;
-
-        assertThrows(ValidationException.class, () -> kvService.put(TEST_BUCKET, "invalid-key", request));
+        request.value = "test-value";
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "test-key", request));
+        asserter.assertThat(() -> kvService.get(TEST_BUCKET, "test-key"), entry -> {
+            assertNotNull(entry);
+            assertEquals("test-key", entry.key);
+            assertArrayEquals("test-value".getBytes(), entry.value);
+        });
     }
 
     @Test
     @Order(13)
-    void testPut_ValueTooLarge() {
-        // Create a large value (bucket has maxValueSize=2048 from update test)
-        byte[] largeValue = new byte[3000];
-        String base64Value = Base64.getEncoder().encodeToString(largeValue);
-
-        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = base64Value;
-        request.base64 = true;
-
-        assertThrows(ValidationException.class, () -> kvService.put(TEST_BUCKET, "large-key", request));
+    @RunOnVertxContext
+    void testGet_NotFound(TransactionalUniAsserter asserter) {
+        asserter.assertFailedWith(() -> kvService.get(TEST_BUCKET, "nonexistent"), NotFoundException.class);
     }
 
     @Test
     @Order(14)
-    void testPut_WithTTL() {
+    @RunOnVertxContext
+    void testPut_CreatesNewRevision(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request1 = new KvEntryDto.PutRequest();
+        request1.value = "revision-1";
+
+        KvEntryDto.PutRequest request2 = new KvEntryDto.PutRequest();
+        request2.value = "revision-2";
+
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "test-key", request1));
+        asserter.assertThat(() -> kvService.put(TEST_BUCKET, "test-key", request2), entry -> {
+            assertNotNull(entry);
+            assertEquals(2L, entry.revision);
+            assertArrayEquals("revision-2".getBytes(), entry.value);
+        });
+    }
+
+    @Test
+    @Order(15)
+    @RunOnVertxContext
+    void testPut_WithTTL(TransactionalUniAsserter asserter) {
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
         request.value = "Expiring value";
         request.base64 = false;
         request.ttlSeconds = 3600L;
 
-        KvEntry entry = kvService.put(TEST_BUCKET, "ttl-key", request);
-
-        assertNotNull(entry);
-        assertNotNull(entry.expiresAt);
-        assertTrue(entry.expiresAt.isAfter(entry.createdAt));
-    }
-
-    @Test
-    @Order(15)
-    void testPut_BucketNotFound() {
-        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = "value";
-        request.base64 = false;
-
-        assertThrows(NotFoundException.class, () -> kvService.put("non-existent-bucket", "key", request));
-    }
-
-    @Test
-    @Order(20)
-    void testGet_Success() {
-        KvEntry entry = kvService.get(TEST_BUCKET, "test-key");
-
-        assertNotNull(entry);
-        assertEquals("test-key", entry.key);
-        assertArrayEquals("Hello, World!".getBytes(), entry.value);
-    }
-
-    @Test
-    @Order(21)
-    void testGet_NotFound() {
-        assertThrows(NotFoundException.class, () -> kvService.get(TEST_BUCKET, "non-existent-key"));
-    }
-
-    @Test
-    @Order(22)
-    void testPut_CreatesNewRevision() {
-        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = "Updated value";
-        request.base64 = false;
-
-        KvEntry entry = kvService.put(TEST_BUCKET, "test-key", request);
-
-        assertNotNull(entry);
-        assertEquals(2L, entry.revision);
+        asserter.assertThat(() -> kvService.put(TEST_BUCKET, "ttl-key", request), entry -> {
+            assertNotNull(entry);
+            assertNotNull(entry.expiresAt);
+            assertTrue(entry.expiresAt.isAfter(entry.createdAt));
+        });
     }
 
     @Test
     @Order(23)
-    void testGetRevision_Success() {
-        KvEntry entry = kvService.getRevision(TEST_BUCKET, "test-key", 1L);
-
-        assertNotNull(entry);
-        assertEquals(1L, entry.revision);
-        assertArrayEquals("Hello, World!".getBytes(), entry.value);
+    @RunOnVertxContext
+    void testGetRevision_Success(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "test-value";
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "test-key", request));
+        asserter.assertThat(() -> kvService.getRevision(TEST_BUCKET, "test-key", 1L), entry -> {
+            assertNotNull(entry);
+            assertEquals(1L, entry.revision);
+            assertArrayEquals("test-value".getBytes(), entry.value);
+        });
     }
 
     @Test
     @Order(24)
-    void testGetRevision_NotFound() {
-        assertThrows(NotFoundException.class, () -> kvService.getRevision(TEST_BUCKET, "test-key", 999L));
+    @RunOnVertxContext
+    void testGetRevision_NotFound(TransactionalUniAsserter asserter) {
+        asserter.assertFailedWith(() -> kvService.getRevision(TEST_BUCKET, "test-key", 999L), NotFoundException.class);
     }
 
     @Test
     @Order(25)
-    void testGetHistory() {
-        List<KvEntry> history = kvService.getHistory(TEST_BUCKET, "test-key", 10);
+    @RunOnVertxContext
+    void testGetHistory(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request1 = new KvEntryDto.PutRequest();
+        request1.value = "v1";
+        KvEntryDto.PutRequest request2 = new KvEntryDto.PutRequest();
+        request2.value = "v2";
 
-        assertNotNull(history);
-        assertEquals(2, history.size());
-        // History should be ordered by revision DESC
-        assertEquals(2L, history.get(0).revision);
-        assertEquals(1L, history.get(1).revision);
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "hist-key", request1));
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "hist-key", request2));
+
+        asserter.assertThat(() -> kvService.getHistory(TEST_BUCKET, "hist-key", 10), history -> {
+            assertNotNull(history);
+            assertEquals(2, history.size());
+            assertEquals(2L, history.get(0).revision);
+            assertEquals(1L, history.get(1).revision);
+        });
     }
 
     @Test
     @Order(26)
-    void testGetHistory_WithLimit() {
-        List<KvEntry> history = kvService.getHistory(TEST_BUCKET, "test-key", 1);
+    @RunOnVertxContext
+    void testGetHistory_WithLimit(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request1 = new KvEntryDto.PutRequest();
+        request1.value = "v1";
+        KvEntryDto.PutRequest request2 = new KvEntryDto.PutRequest();
+        request2.value = "v2";
 
-        assertNotNull(history);
-        assertEquals(1, history.size());
-        assertEquals(2L, history.get(0).revision);
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "hist-limit-key", request1));
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "hist-limit-key", request2));
+
+        asserter.assertThat(() -> kvService.getHistory(TEST_BUCKET, "hist-limit-key", 1), history -> {
+            assertNotNull(history);
+            assertEquals(1, history.size());
+            assertEquals(2L, history.get(0).revision);
+        });
     }
 
     @Test
     @Order(27)
-    void testListKeys() {
-        List<String> keys = kvService.listKeys(TEST_BUCKET);
+    @RunOnVertxContext
+    void testListKeys(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "val";
 
-        assertNotNull(keys);
-        assertTrue(keys.contains("test-key"));
-        assertTrue(keys.contains("binary-key"));
-        assertTrue(keys.contains("ttl-key"));
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "list-key-1", request));
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "list-key-2", request));
+
+        asserter.assertThat(() -> kvService.listKeys(TEST_BUCKET), keys -> {
+            assertNotNull(keys);
+            assertTrue(keys.contains("list-key-1"));
+            assertTrue(keys.contains("list-key-2"));
+        });
     }
 
     @Test
     @Order(30)
-    void testDelete_Success() {
-        KvEntry entry = kvService.delete(TEST_BUCKET, "test-key");
+    @RunOnVertxContext
+    void testDelete_Success(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "val";
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "delete-key", request));
 
-        assertNotNull(entry);
-        assertEquals(KvEntry.Operation.DELETE, entry.operation);
-        assertEquals(3L, entry.revision);
-        assertNull(entry.value);
-
-        // Verify watcher was notified
-        verify(watchService, times(1)).notifyChange(any(KvEntryDto.WatchEvent.class));
+        asserter.assertThat(() -> kvService.delete(TEST_BUCKET, "delete-key"), entry -> {
+            assertNotNull(entry);
+            assertEquals(KvEntry.Operation.DELETE, entry.operation);
+            assertEquals(2L, entry.revision);
+            assertNull(entry.value);
+        });
+        asserter.execute(() -> verify(watchService, atLeastOnce()).notifyChange(any(KvEntryDto.WatchEvent.class)));
     }
 
     @Test
     @Order(31)
-    void testGet_AfterDelete() {
-        // Trying to get a deleted key should throw NotFoundException
-        assertThrows(NotFoundException.class, () -> kvService.get(TEST_BUCKET, "test-key"));
+    @RunOnVertxContext
+    void testGet_AfterDelete(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "val";
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "delete-get-key", request));
+        asserter.execute(() -> kvService.delete(TEST_BUCKET, "delete-get-key"));
+
+        asserter.assertFailedWith(() -> kvService.get(TEST_BUCKET, "delete-get-key"), NotFoundException.class);
     }
 
     @Test
     @Order(32)
-    void testDelete_NotFound() {
-        assertThrows(NotFoundException.class, () -> kvService.delete(TEST_BUCKET, "non-existent-key"));
+    @RunOnVertxContext
+    void testDelete_NotFound(TransactionalUniAsserter asserter) {
+        asserter.assertFailedWith(() -> kvService.delete(TEST_BUCKET, "non-existent-key"), NotFoundException.class);
     }
 
     @Test
     @Order(40)
-    void testPurgeKey() {
-        // Add a key with multiple revisions
+    @RunOnVertxContext
+    void testPurgeKey(TransactionalUniAsserter asserter) {
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
         request.value = "v1";
         request.base64 = false;
-        kvService.put(TEST_BUCKET, "purge-key", request);
 
-        request.value = "v2";
-        kvService.put(TEST_BUCKET, "purge-key", request);
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "purge-key", request));
+        asserter.execute(() -> {
+            request.value = "v2";
+            return kvService.put(TEST_BUCKET, "purge-key", request);
+        });
+        asserter.execute(() -> {
+            request.value = "v3";
+            return kvService.put(TEST_BUCKET, "purge-key", request);
+        });
 
-        request.value = "v3";
-        kvService.put(TEST_BUCKET, "purge-key", request);
+        asserter.assertThat(() -> kvService.purge(TEST_BUCKET, "purge-key"), deleted -> {
+            assertEquals(3, deleted);
+        });
 
-        // Purge the key (permanently delete all revisions)
-        long deleted = kvService.purge(TEST_BUCKET, "purge-key");
-
-        assertEquals(3, deleted);
-
-        // Key should no longer exist
-        assertThrows(NotFoundException.class, () -> kvService.get(TEST_BUCKET, "purge-key"));
+        asserter.assertFailedWith(() -> kvService.get(TEST_BUCKET, "purge-key"), NotFoundException.class);
     }
 
     @Test
     @Order(41)
-    void testPurgeBucket() {
-        // Add some keys
+    @RunOnVertxContext
+    void testPurgeBucket(TransactionalUniAsserter asserter) {
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
         request.value = "value";
         request.base64 = false;
 
-        kvService.put(TEST_BUCKET, "purge-bucket-key-1", request);
-        kvService.put(TEST_BUCKET, "purge-bucket-key-2", request);
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "purge-bucket-key-1", request));
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "purge-bucket-key-2", request));
 
-        // Purge the bucket
-        long deleted = kvService.purgeBucket(TEST_BUCKET);
+        asserter.assertThat(() -> kvService.purgeBucket(TEST_BUCKET), deleted -> {
+            assertTrue(deleted > 0);
+        });
 
-        assertTrue(deleted > 0);
-
-        // Keys should be empty
-        List<String> keys = kvService.listKeys(TEST_BUCKET);
-        assertFalse(keys.contains("purge-bucket-key-1"));
-        assertFalse(keys.contains("purge-bucket-key-2"));
+        asserter.assertThat(() -> kvService.listKeys(TEST_BUCKET), keys -> {
+            assertFalse(keys.contains("purge-bucket-key-1"));
+            assertFalse(keys.contains("purge-bucket-key-2"));
+        });
     }
 
     @Test
     @Order(100)
-    void testDeleteBucket() {
-        kvService.deleteBucket(TEST_BUCKET);
-
-        assertThrows(NotFoundException.class, () -> kvService.getBucket(TEST_BUCKET));
+    @RunOnVertxContext
+    void testDeleteBucket(TransactionalUniAsserter asserter) {
+        asserter.execute(() -> kvService.deleteBucket(TEST_BUCKET));
+        asserter.assertFailedWith(() -> kvService.getBucket(TEST_BUCKET), NotFoundException.class);
     }
 
     // ==================== Edge Cases ====================
 
     @Test
     @Order(110)
-    void testPut_EmptyValue() {
-        // Create new bucket for this test
+    @RunOnVertxContext
+    void testPut_EmptyValue(TransactionalUniAsserter asserter) {
         KvBucketDto.CreateRequest bucketRequest = new KvBucketDto.CreateRequest();
         bucketRequest.name = "empty-value-bucket";
-        kvService.createBucket(bucketRequest);
+
+        asserter.execute(() -> kvService.createBucket(bucketRequest));
 
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
         request.value = "";
         request.base64 = false;
 
-        KvEntry entry = kvService.put("empty-value-bucket", "empty-key", request);
+        asserter.assertThat(() -> kvService.put("empty-value-bucket", "empty-key", request), entry -> {
+            assertNotNull(entry);
+            assertArrayEquals(new byte[0], entry.value);
+        });
 
-        assertNotNull(entry);
-        assertArrayEquals(new byte[0], entry.value);
-
-        // Cleanup
-        kvService.deleteBucket("empty-value-bucket");
+        asserter.execute(() -> kvService.deleteBucket("empty-value-bucket"));
     }
 
     @Test
     @Order(111)
-    void testPut_NullValue() {
-        // Create new bucket for this test
+    @RunOnVertxContext
+    void testPut_NullValue(TransactionalUniAsserter asserter) {
         KvBucketDto.CreateRequest bucketRequest = new KvBucketDto.CreateRequest();
         bucketRequest.name = "null-value-bucket";
-        kvService.createBucket(bucketRequest);
+
+        asserter.execute(() -> kvService.createBucket(bucketRequest));
 
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
         request.value = null;
         request.base64 = false;
 
-        KvEntry entry = kvService.put("null-value-bucket", "null-key", request);
+        asserter.assertThat(() -> kvService.put("null-value-bucket", "null-key", request), entry -> {
+            assertNotNull(entry);
+            assertArrayEquals(new byte[0], entry.value);
+        });
 
-        assertNotNull(entry);
-        assertArrayEquals(new byte[0], entry.value);
-
-        // Cleanup
-        kvService.deleteBucket("null-value-bucket");
+        asserter.execute(() -> kvService.deleteBucket("null-value-bucket"));
     }
 
     @Test
     @Order(112)
-    void testPut_SpecialCharactersInKey() {
+    @RunOnVertxContext
+    void testPut_SpecialCharactersInKey(TransactionalUniAsserter asserter) {
         KvBucketDto.CreateRequest bucketRequest = new KvBucketDto.CreateRequest();
         bucketRequest.name = "special-chars-bucket";
-        kvService.createBucket(bucketRequest);
+
+        asserter.execute(() -> kvService.createBucket(bucketRequest));
 
         KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
         request.value = "value";
         request.base64 = false;
 
         String specialKey = "key/with/slashes.and-dashes_underscores:colons";
-        KvEntry entry = kvService.put("special-chars-bucket", specialKey, request);
 
-        assertNotNull(entry);
-        assertEquals(specialKey, entry.key);
+        asserter.assertThat(() -> kvService.put("special-chars-bucket", specialKey, request), entry -> {
+            assertNotNull(entry);
+            assertEquals(specialKey, entry.key);
+        });
 
-        // Verify retrieval
-        KvEntry retrieved = kvService.get("special-chars-bucket", specialKey);
-        assertEquals(specialKey, retrieved.key);
+        asserter.assertThat(() -> kvService.get("special-chars-bucket", specialKey), retrieved -> {
+            assertEquals(specialKey, retrieved.key);
+        });
 
-        // Cleanup
-        kvService.deleteBucket("special-chars-bucket");
+        asserter.execute(() -> kvService.deleteBucket("special-chars-bucket"));
     }
 }

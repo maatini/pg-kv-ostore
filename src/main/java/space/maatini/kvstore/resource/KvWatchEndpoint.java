@@ -1,5 +1,6 @@
 package space.maatini.kvstore.resource;
 
+import io.smallrye.mutiny.Multi;
 import space.maatini.kvstore.dto.KvEntryDto;
 import space.maatini.kvstore.entity.KvEntry;
 import space.maatini.kvstore.service.KvService;
@@ -97,20 +98,23 @@ public class KvWatchEndpoint {
     }
 
     private void replayHistory(Session session, String bucket, long since) {
-        try {
-            List<String> keys = kvService.listKeys(bucket);
-            for (String key : keys) {
-                List<KvEntry> history = kvService.getHistory(bucket, key, 100);
-                for (KvEntry entry : history) {
-                    if (entry.revision > since) {
-                        KvEntryDto.WatchEvent event = KvEntryDto.WatchEvent.from(entry, bucket);
-                        session.getBasicRemote().sendText(
-                                new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(event));
-                    }
-                }
-            }
-        } catch (Exception e) {
-            LOG.error("Failed to replay history", e);
-        }
+        kvService.listKeys(bucket)
+                .onItem().transformToMulti(keys -> Multi.createFrom().iterable(keys))
+                .onItem().transformToUniAndConcatenate(key -> kvService.getHistory(bucket, key, 100))
+                .subscribe().with(
+                        history -> {
+                            try {
+                                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                                for (KvEntry entry : history) {
+                                    if (entry.revision > since) {
+                                        KvEntryDto.WatchEvent event = KvEntryDto.WatchEvent.from(entry, bucket);
+                                        session.getAsyncRemote().sendText(mapper.writeValueAsString(event));
+                                    }
+                                }
+                            } catch (Exception e) {
+                                LOG.error("Failed to replay history segment", e);
+                            }
+                        },
+                        error -> LOG.error("Error fetching history for replay", error));
     }
 }

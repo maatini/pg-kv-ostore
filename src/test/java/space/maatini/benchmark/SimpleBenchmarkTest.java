@@ -1,5 +1,7 @@
 package space.maatini.benchmark;
 
+import io.quarkus.test.common.http.TestHTTPResource;
+import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -13,9 +15,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
+@QuarkusTest
 public class SimpleBenchmarkTest {
 
-    private static final String BASE_URL = "http://localhost:8080/api/v1";
+    @TestHTTPResource("/api/v1")
+    URI baseUri;
+
     private static final HttpClient client = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(10))
@@ -46,7 +51,7 @@ public class SimpleBenchmarkTest {
         printStats("READ", startRead, endRead);
     }
 
-    private static void runBenchmark(String name, Operation operation) throws Exception {
+    private void runBenchmark(String name, Operation operation) throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(CONCURRENCY);
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         AtomicInteger successCount = new AtomicInteger(0);
@@ -74,7 +79,7 @@ public class SimpleBenchmarkTest {
         System.out.println(name + " finished. Success: " + successCount.get() + ", Errors: " + errorCount.get());
     }
 
-    private static void printStats(String name, long start, long end) {
+    private void printStats(String name, long start, long end) {
         long durationMs = end - start;
         double seconds = durationMs / 1000.0;
         double opsPerSec = NUM_OPERATIONS / seconds;
@@ -88,10 +93,10 @@ public class SimpleBenchmarkTest {
         System.out.println("--------------------------------------------------");
     }
 
-    private static void createBucket(String name) throws Exception {
+    private void createBucket(String name) throws Exception {
         String json = "{\"name\":\"" + name + "\",\"description\":\"Benchmark Bucket\"}";
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(BASE_URL + "/kv/buckets"))
+                .uri(URI.create(baseUri.toString() + "/kv/buckets"))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build();
@@ -104,11 +109,11 @@ public class SimpleBenchmarkTest {
         }
     }
 
-    private static boolean putKey(String bucket, String key, String value) {
+    private boolean putKey(String bucket, String key, String value) {
         try {
             String json = "{\"value\":\"" + value + "\"}";
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(BASE_URL + "/kv/buckets/" + bucket + "/keys/" + key))
+                    .uri(URI.create(baseUri.toString() + "/kv/buckets/" + bucket + "/keys/" + key))
                     .header("Content-Type", "application/json")
                     .PUT(HttpRequest.BodyPublishers.ofString(json))
                     .build();
@@ -119,10 +124,10 @@ public class SimpleBenchmarkTest {
         }
     }
 
-    private static boolean getKey(String bucket, String key) {
+    private boolean getKey(String bucket, String key) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(BASE_URL + "/kv/buckets/" + bucket + "/keys/" + key))
+                    .uri(URI.create(baseUri.toString() + "/kv/buckets/" + bucket + "/keys/" + key))
                     .GET()
                     .build();
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());

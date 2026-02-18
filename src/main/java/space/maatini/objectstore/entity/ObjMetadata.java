@@ -1,6 +1,7 @@
 package space.maatini.objectstore.entity;
 
-import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
+import io.quarkus.hibernate.reactive.panache.PanacheEntityBase;
+import io.smallrye.mutiny.Uni;
 import jakarta.persistence.*;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -65,19 +66,19 @@ public class ObjMetadata extends PanacheEntityBase {
     }
 
     // Panache Finder Methods
-    public static ObjMetadata findByBucketAndName(UUID bucketId, String name) {
+    public static Uni<ObjMetadata> findByBucketAndName(UUID bucketId, String name) {
         return find("bucketId = ?1 AND name = ?2", bucketId, name).firstResult();
     }
 
-    public static List<ObjMetadata> findByBucket(UUID bucketId) {
+    public static Uni<List<ObjMetadata>> findByBucket(UUID bucketId) {
         return list("bucketId", bucketId);
     }
 
-    public static boolean existsByBucketAndName(UUID bucketId, String name) {
-        return count("bucketId = ?1 AND name = ?2", bucketId, name) > 0;
+    public static Uni<Boolean> existsByBucketAndName(UUID bucketId, String name) {
+        return count("bucketId = ?1 AND name = ?2", bucketId, name).map(count -> count > 0);
     }
 
-    public static long deleteByBucket(UUID bucketId) {
+    public static Uni<Long> deleteByBucket(UUID bucketId) {
         return delete("bucketId", bucketId);
     }
 }

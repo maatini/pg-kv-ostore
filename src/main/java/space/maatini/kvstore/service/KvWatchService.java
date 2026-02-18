@@ -170,7 +170,19 @@ public class KvWatchService {
     /**
      * Get the number of watched keys.
      */
+    /**
+     * Get the number of watched keys.
+     */
     public int getWatchedKeyCount() {
         return keyWatchers.size();
+    }
+
+    /**
+     * Clear all active watchers (used for testing).
+     */
+    public void clear() {
+        bucketWatchers.clear();
+        keyWatchers.clear();
+        subscriptions.clear();
     }
 }

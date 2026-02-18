@@ -8,15 +8,17 @@ import space.maatini.objectstore.dto.ObjMetadataDto;
 import space.maatini.objectstore.entity.ObjBucket;
 import space.maatini.objectstore.entity.ObjChunk;
 import space.maatini.objectstore.entity.ObjMetadata;
+import io.smallrye.mutiny.Multi;
+import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.transaction.Transactional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import io.quarkus.hibernate.reactive.panache.common.WithSession;
+import io.quarkus.hibernate.reactive.panache.common.WithTransaction;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -28,6 +30,7 @@ import java.util.stream.Collectors;
  * Service for Object Store operations.
  */
 @ApplicationScoped
+@WithSession
 public class ObjectStoreService {
 
     private static final Logger LOG = Logger.getLogger(ObjectStoreService.class);
@@ -46,173 +49,196 @@ public class ObjectStoreService {
 
     // ==================== Bucket Operations ====================
 
-    @Transactional
-    public ObjBucket createBucket(ObjBucketDto.CreateRequest request) {
+    @WithTransaction
+    public Uni<ObjBucket> createBucket(ObjBucketDto.CreateRequest request) {
         LOG.debugf("Creating object bucket: %s", request.name);
 
-        if (ObjBucket.existsByName(request.name)) {
-            throw new ConflictException("Object bucket already exists: " + request.name);
-        }
+        return ObjBucket.existsByName(request.name)
+                .flatMap(exists -> {
+                    if (exists) {
+                        throw new ConflictException("Object bucket already exists: " + request.name);
+                    }
 
-        ObjBucket bucket = new ObjBucket();
-        bucket.name = request.name;
-        bucket.description = request.description;
-        bucket.chunkSize = request.chunkSize != null ? request.chunkSize : chunkSize;
-        bucket.maxObjectSize = request.maxObjectSize != null ? request.maxObjectSize : maxObjectSize;
-        bucket.persist();
+                    ObjBucket bucket = new ObjBucket();
+                    bucket.name = request.name;
+                    bucket.description = request.description;
+                    bucket.chunkSize = request.chunkSize != null ? request.chunkSize : chunkSize;
+                    bucket.maxObjectSize = request.maxObjectSize != null ? request.maxObjectSize : maxObjectSize;
 
-        LOG.infof("Created object bucket: %s (id=%s)", bucket.name, bucket.id);
-        return bucket;
+                    return bucket.<ObjBucket>persist()
+                            .invoke(b -> LOG.infof("Created object bucket: %s (id=%s)", b.name, b.id));
+                });
     }
 
-    public ObjBucket getBucket(String name) {
-        ObjBucket bucket = ObjBucket.findByName(name);
-        if (bucket == null) {
-            throw new NotFoundException("Object bucket not found: " + name);
-        }
-        return bucket;
+    public Uni<ObjBucket> getBucket(String name) {
+        return ObjBucket.findByName(name)
+                .onItem().ifNull().failWith(() -> new NotFoundException("Object bucket not found: " + name));
     }
 
-    public List<ObjBucket> listBuckets() {
+    public Uni<List<ObjBucket>> listBuckets() {
         return ObjBucket.listAll();
     }
 
-    @Transactional
-    public ObjBucket updateBucket(String name, ObjBucketDto.UpdateRequest request) {
-        ObjBucket bucket = getBucket(name);
+    @WithTransaction
+    public Uni<ObjBucket> updateBucket(String name, ObjBucketDto.UpdateRequest request) {
+        return getBucket(name)
+                .flatMap(bucket -> {
+                    if (request.description != null) {
+                        bucket.description = request.description;
+                    }
+                    if (request.chunkSize != null) {
+                        bucket.chunkSize = request.chunkSize;
+                    }
+                    if (request.maxObjectSize != null) {
+                        bucket.maxObjectSize = request.maxObjectSize;
+                    }
 
-        if (request.description != null) {
-            bucket.description = request.description;
-        }
-        if (request.chunkSize != null) {
-            bucket.chunkSize = request.chunkSize;
-        }
-        if (request.maxObjectSize != null) {
-            bucket.maxObjectSize = request.maxObjectSize;
-        }
-
-        bucket.persist();
-        LOG.infof("Updated object bucket: %s", bucket.name);
-        return bucket;
+                    return bucket.<ObjBucket>persist()
+                            .invoke(b -> LOG.infof("Updated object bucket: %s", b.name));
+                });
     }
 
-    @Transactional
-    public void deleteBucket(String name) {
-        ObjBucket bucket = getBucket(name);
-
-        // Delete all objects first
-        List<ObjMetadata> objects = ObjMetadata.findByBucket(bucket.id);
-        for (ObjMetadata obj : objects) {
-            ObjChunk.deleteByMetadata(obj.id);
-            obj.delete();
-        }
-        LOG.infof("Deleted %d objects from bucket: %s", objects.size(), name);
-
-        bucket.delete();
-        LOG.infof("Deleted object bucket: %s", name);
+    @WithTransaction
+    public Uni<Void> deleteBucket(String name) {
+        return getBucket(name)
+                .flatMap(bucket -> ObjMetadata.findByBucket(bucket.id)
+                        .flatMap(objects -> {
+                            if (objects.isEmpty())
+                                return Uni.createFrom().item(objects);
+                            return Uni.combine().all().unis(
+                                    objects.stream().map(obj -> ObjChunk.deleteByMetadata(obj.id)
+                                            .flatMap(d -> obj.delete())).collect(Collectors.toList()))
+                                    .discardItems().replaceWith(objects);
+                        })
+                        .invoke(objects -> LOG.infof("Deleted %d objects from bucket: %s", objects.size(), name))
+                        .replaceWith(bucket))
+                .flatMap(bucket -> bucket.delete())
+                .invoke(() -> LOG.infof("Deleted object bucket: %s", name))
+                .replaceWithVoid();
     }
 
     // ==================== Object Operations ====================
 
-    @Transactional
-    public ObjMetadata putObject(
+    @WithTransaction
+    public Uni<ObjMetadata> putObject(
             String bucketName,
             String objectName,
-            InputStream data,
+            Multi<byte[]> dataStream,
             String contentType,
             String description,
-            Map<String, String> headers) throws IOException {
+            Map<String, String> headers) {
 
-        ObjBucket bucket = getBucket(bucketName);
-        LOG.debugf("Putting object: %s/%s", bucketName, objectName);
+        return getBucket(bucketName)
+                .flatMap(bucket -> {
+                    // Check if object already exists and delete it
+                    return ObjMetadata.findByBucketAndName(bucket.id, objectName)
+                            .flatMap(existing -> {
+                                if (existing != null) {
+                                    return ObjChunk.deleteByMetadata(existing.id)
+                                            .flatMap(d -> existing.delete())
+                                            .replaceWithVoid();
+                                }
+                                return Uni.createFrom().voidItem();
+                            })
+                            .replaceWith(bucket);
+                })
+                .flatMap(bucket -> {
+                    // This is a simplified reactive chunking.
+                    // In a real scenario, we might want to use a stateful transformation or
+                    // collect.
+                    // For now, let's accumulate into chunks.
 
-        // Check if object already exists and delete it
-        ObjMetadata existing = ObjMetadata.findByBucketAndName(bucket.id, objectName);
-        if (existing != null) {
-            ObjChunk.deleteByMetadata(existing.id);
-            existing.delete();
-            LOG.debugf("Replaced existing object: %s/%s", bucketName, objectName);
-        }
+                    ObjMetadata metadata = new ObjMetadata();
+                    metadata.bucketId = bucket.id;
+                    metadata.name = objectName;
+                    metadata.size = 0L;
+                    metadata.chunkCount = 0;
+                    metadata.digestAlgorithm = hashAlgorithm;
+                    metadata.contentType = contentType;
+                    metadata.description = description;
+                    metadata.headers = headers;
 
-        // Read and chunk the data
+                    return metadata.<ObjMetadata>persist()
+                            .flatMap(m -> {
+                                // Process stream and store chunks
+                                // Note: This is a complex reactive pipe.
+                                // We'll use a local state to track chunks.
+                                return processDataStream(m, dataStream, bucket.chunkSize, bucket.maxObjectSize)
+                                        .flatMap(finalMetadata -> finalMetadata.<ObjMetadata>persist())
+                                        .invoke(fm -> LOG.infof("Stored object: %s/%s (size=%d, chunks=%d, digest=%s)",
+                                                bucketName, objectName, fm.size, fm.chunkCount, fm.digest))
+                                        .invoke(fm -> watchService
+                                                .notifyChange(ObjMetadataDto.WatchEvent.fromPut(fm, bucketName)));
+                            });
+                });
+    }
+
+    private Uni<ObjMetadata> processDataStream(ObjMetadata metadata, Multi<byte[]> dataStream, int chunkSize,
+            long maxSize) {
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance(hashAlgorithm);
         } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("Hash algorithm not available: " + hashAlgorithm, e);
+            return Uni.createFrom().failure(e);
         }
 
-        ByteArrayOutputStream totalBuffer = new ByteArrayOutputStream();
-        byte[] buffer = new byte[bucket.chunkSize];
-        int bytesRead;
-        int chunkIndex = 0;
-        long totalSize = 0;
+        // State holder for chunking
+        class State {
+            long totalSize = 0;
+            int chunkIndex = 0;
+            byte[] leftover = new byte[0];
+        }
+        State state = new State();
 
-        // Create metadata first (we'll update it after)
-        ObjMetadata metadata = new ObjMetadata();
-        metadata.bucketId = bucket.id;
-        metadata.name = objectName;
-        metadata.size = 0L;
-        metadata.chunkCount = 0;
-        metadata.digestAlgorithm = hashAlgorithm;
-        metadata.contentType = contentType;
-        metadata.description = description;
-        metadata.headers = headers;
-        metadata.persist();
+        return dataStream.onItem().transformToUniAndConcatenate(data -> {
+            state.totalSize += data.length;
+            if (state.totalSize > maxSize) {
+                return Uni.createFrom().failure(new ValidationException("Object size exceeds maximum"));
+            }
+            digest.update(data);
 
-        // Read chunks and store
-        ByteArrayOutputStream chunkBuffer = new ByteArrayOutputStream();
-        while ((bytesRead = data.read(buffer)) != -1) {
-            chunkBuffer.write(buffer, 0, bytesRead);
-            digest.update(buffer, 0, bytesRead);
-            totalSize += bytesRead;
-
-            // Check size limit
-            if (totalSize > bucket.maxObjectSize) {
-                // Rollback: delete metadata and any chunks
-                ObjChunk.deleteByMetadata(metadata.id);
-                metadata.delete();
-                throw new ValidationException(String.format(
-                        "Object size exceeds maximum (%d bytes)", bucket.maxObjectSize));
+            // Concatenate with leftover
+            byte[] combined;
+            if (state.leftover.length > 0) {
+                combined = new byte[state.leftover.length + data.length];
+                System.arraycopy(state.leftover, 0, combined, 0, state.leftover.length);
+                System.arraycopy(data, 0, combined, state.leftover.length, data.length);
+            } else {
+                combined = data;
             }
 
-            // If chunk buffer is full, store chunk
-            while (chunkBuffer.size() >= bucket.chunkSize) {
-                byte[] chunkData = chunkBuffer.toByteArray();
-                byte[] toStore = new byte[bucket.chunkSize];
-                System.arraycopy(chunkData, 0, toStore, 0, bucket.chunkSize);
-
-                storeChunk(metadata, chunkIndex++, toStore);
-
-                // Keep remaining bytes
-                byte[] remaining = new byte[chunkData.length - bucket.chunkSize];
-                System.arraycopy(chunkData, bucket.chunkSize, remaining, 0, remaining.length);
-                chunkBuffer.reset();
-                chunkBuffer.write(remaining, 0, remaining.length);
+            int offset = 0;
+            List<Uni<Void>> chunkOps = new java.util.ArrayList<>();
+            while (combined.length - offset >= chunkSize) {
+                byte[] chunkData = new byte[chunkSize];
+                System.arraycopy(combined, offset, chunkData, 0, chunkSize);
+                chunkOps.add(storeChunk(metadata, state.chunkIndex++, chunkData));
+                offset += chunkSize;
             }
-        }
 
-        // Store final partial chunk if any
-        if (chunkBuffer.size() > 0) {
-            storeChunk(metadata, chunkIndex++, chunkBuffer.toByteArray());
-        }
+            state.leftover = new byte[combined.length - offset];
+            System.arraycopy(combined, offset, state.leftover, 0, state.leftover.length);
 
-        // Update metadata with final values
-        metadata.size = totalSize;
-        metadata.chunkCount = chunkIndex;
-        metadata.digest = HexFormat.of().formatHex(digest.digest());
-        metadata.persist();
-
-        LOG.infof("Stored object: %s/%s (size=%d, chunks=%d, digest=%s)",
-                bucketName, objectName, totalSize, chunkIndex, metadata.digest);
-
-        // Notify watchers
-        watchService.notifyChange(ObjMetadataDto.WatchEvent.fromPut(metadata, bucketName));
-
-        return metadata;
+            if (chunkOps.isEmpty())
+                return Uni.createFrom().voidItem();
+            return Uni.combine().all().unis(chunkOps).discardItems();
+        }).collect().last()
+                .flatMap(v -> {
+                    // Store final leftover
+                    if (state.leftover.length > 0) {
+                        return storeChunk(metadata, state.chunkIndex++, state.leftover);
+                    }
+                    return Uni.createFrom().voidItem();
+                })
+                .map(v -> {
+                    metadata.size = state.totalSize;
+                    metadata.chunkCount = state.chunkIndex;
+                    metadata.digest = HexFormat.of().formatHex(digest.digest());
+                    return metadata;
+                });
     }
 
-    private void storeChunk(ObjMetadata metadata, int index, byte[] data) {
+    private Uni<Void> storeChunk(ObjMetadata metadata, int index, byte[] data) {
         ObjChunk chunk = new ObjChunk();
         chunk.metadataId = metadata.id;
         chunk.chunkIndex = index;
@@ -227,127 +253,86 @@ public class ObjectStoreService {
             LOG.warn("Could not calculate chunk digest", e);
         }
 
-        chunk.persist();
+        return chunk.<ObjChunk>persist().replaceWithVoid();
     }
 
-    public ObjMetadata getMetadata(String bucketName, String objectName) {
-        ObjBucket bucket = getBucket(bucketName);
-        ObjMetadata metadata = ObjMetadata.findByBucketAndName(bucket.id, objectName);
-
-        if (metadata == null) {
-            throw new NotFoundException(String.format("Object not found: %s/%s", bucketName, objectName));
-        }
-
-        return metadata;
+    public Uni<ObjMetadata> getMetadata(String bucketName, String objectName) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> ObjMetadata.findByBucketAndName(bucket.id, objectName)
+                        .onItem().ifNull().failWith(() -> new NotFoundException(
+                                String.format("Object not found: %s/%s", bucketName, objectName))));
     }
 
-    public List<ObjMetadata> listObjects(String bucketName) {
-        ObjBucket bucket = getBucket(bucketName);
-        return ObjMetadata.findByBucket(bucket.id);
+    public Uni<List<ObjMetadata>> listObjects(String bucketName) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> ObjMetadata.findByBucket(bucket.id));
     }
 
     /**
-     * Get a streaming iterator over object chunks.
+     * Get a streaming Multi of object chunks.
      */
-    public ChunkIterator getObjectChunks(String bucketName, String objectName) {
-        ObjMetadata metadata = getMetadata(bucketName, objectName);
-        return new ChunkIterator(metadata.id, metadata.chunkCount);
+    public Multi<ObjChunk> getObjectChunks(String bucketName, String objectName) {
+        return getMetadata(bucketName, objectName)
+                .onItem()
+                .transformToMulti(metadata -> ObjChunk.findByMetadataOrdered(metadata.id)
+                        .onItem().transformToMulti(chunks -> Multi.createFrom().iterable(chunks)));
     }
 
     /**
      * Get the complete object data (for smaller objects).
      */
-    public byte[] getObjectData(String bucketName, String objectName) throws IOException {
-        ObjMetadata metadata = getMetadata(bucketName, objectName);
-        List<ObjChunk> chunks = ObjChunk.findByMetadataOrdered(metadata.id);
-
-        ByteArrayOutputStream output = new ByteArrayOutputStream((int) (long) metadata.size);
-        for (ObjChunk chunk : chunks) {
-            output.write(chunk.data);
-        }
-
-        return output.toByteArray();
+    public Uni<byte[]> getObjectData(String bucketName, String objectName) {
+        return getMetadata(bucketName, objectName)
+                .flatMap(metadata -> ObjChunk.findByMetadataOrdered(metadata.id)
+                        .map(chunks -> {
+                            ByteArrayOutputStream output = new ByteArrayOutputStream((int) (long) metadata.size);
+                            for (ObjChunk chunk : chunks) {
+                                try {
+                                    output.write(chunk.data);
+                                } catch (IOException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            }
+                            return output.toByteArray();
+                        }));
     }
 
-    @Transactional
-    public void deleteObject(String bucketName, String objectName) {
-        ObjBucket bucket = getBucket(bucketName);
-        ObjMetadata metadata = ObjMetadata.findByBucketAndName(bucket.id, objectName);
-
-        if (metadata == null) {
-            throw new NotFoundException(String.format("Object not found: %s/%s", bucketName, objectName));
-        }
-
-        // Delete chunks first
-        long deletedChunks = ObjChunk.deleteByMetadata(metadata.id);
-        metadata.delete();
-
-        LOG.infof("Deleted object: %s/%s (chunks=%d)", bucketName, objectName, deletedChunks);
-
-        // Notify watchers
-        watchService.notifyChange(ObjMetadataDto.WatchEvent.fromDelete(bucketName, objectName));
+    @WithTransaction
+    public Uni<Void> deleteObject(String bucketName, String objectName) {
+        return getMetadata(bucketName, objectName)
+                .flatMap(metadata -> ObjChunk.deleteByMetadata(metadata.id)
+                        .flatMap(deletedChunks -> metadata.delete())
+                        .invoke(() -> LOG.infof("Deleted object: %s/%s", bucketName, objectName))
+                        .invoke(() -> watchService
+                                .notifyChange(ObjMetadataDto.WatchEvent.fromDelete(bucketName, objectName))))
+                .replaceWithVoid();
     }
 
     /**
      * Verify object integrity by comparing stored digest with computed digest.
      */
-    public boolean verifyIntegrity(String bucketName, String objectName) {
-        ObjMetadata metadata = getMetadata(bucketName, objectName);
-        List<ObjChunk> chunks = ObjChunk.findByMetadataOrdered(metadata.id);
+    public Uni<Boolean> verifyIntegrity(String bucketName, String objectName) {
+        return getMetadata(bucketName, objectName)
+                .flatMap(metadata -> ObjChunk.findByMetadataOrdered(metadata.id)
+                        .map(chunks -> {
+                            try {
+                                MessageDigest digest = MessageDigest.getInstance(metadata.digestAlgorithm);
+                                for (ObjChunk chunk : chunks) {
+                                    digest.update(chunk.data);
+                                }
+                                String computed = HexFormat.of().formatHex(digest.digest());
+                                boolean valid = computed.equals(metadata.digest);
 
-        try {
-            MessageDigest digest = MessageDigest.getInstance(metadata.digestAlgorithm);
-            for (ObjChunk chunk : chunks) {
-                digest.update(chunk.data);
-            }
-            String computed = HexFormat.of().formatHex(digest.digest());
-            boolean valid = computed.equals(metadata.digest);
+                                if (!valid) {
+                                    LOG.warnf("Integrity check failed for %s/%s: expected=%s, computed=%s",
+                                            bucketName, objectName, metadata.digest, computed);
+                                }
 
-            if (!valid) {
-                LOG.warnf("Integrity check failed for %s/%s: expected=%s, computed=%s",
-                        bucketName, objectName, metadata.digest, computed);
-            }
-
-            return valid;
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("Hash algorithm not available: " + metadata.digestAlgorithm, e);
-        }
-    }
-
-    /**
-     * Iterator for streaming object chunks.
-     */
-    public static class ChunkIterator {
-        private final java.util.UUID metadataId;
-        private final int totalChunks;
-        private int currentIndex = 0;
-
-        public ChunkIterator(java.util.UUID metadataId, int totalChunks) {
-            this.metadataId = metadataId;
-            this.totalChunks = totalChunks;
-        }
-
-        public boolean hasNext() {
-            return currentIndex < totalChunks;
-        }
-
-        public ObjChunk next() {
-            if (!hasNext()) {
-                throw new java.util.NoSuchElementException();
-            }
-            ObjChunk chunk = ObjChunk.findByMetadataAndIndex(metadataId, currentIndex++);
-            if (chunk == null) {
-                throw new IllegalStateException("Missing chunk at index " + (currentIndex - 1));
-            }
-            return chunk;
-        }
-
-        public int getTotalChunks() {
-            return totalChunks;
-        }
-
-        public int getCurrentIndex() {
-            return currentIndex;
-        }
+                                return valid;
+                            } catch (NoSuchAlgorithmException e) {
+                                throw new RuntimeException("Hash algorithm not available: " + metadata.digestAlgorithm,
+                                        e);
+                            }
+                        }));
     }
 }

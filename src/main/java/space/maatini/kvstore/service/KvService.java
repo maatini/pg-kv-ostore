@@ -1,5 +1,6 @@
 package space.maatini.kvstore.service;
 
+import io.smallrye.mutiny.Uni;
 import space.maatini.common.exception.ConflictException;
 import space.maatini.common.exception.NotFoundException;
 import space.maatini.common.exception.ValidationException;
@@ -10,8 +11,9 @@ import space.maatini.kvstore.entity.KvEntry;
 import space.maatini.kvstore.entity.KvEntry.Operation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.transaction.Transactional;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import io.quarkus.hibernate.reactive.panache.common.WithSession;
+import io.quarkus.hibernate.reactive.panache.common.WithTransaction;
 import org.jboss.logging.Logger;
 
 import java.time.OffsetDateTime;
@@ -23,6 +25,7 @@ import java.util.stream.Collectors;
  * Service for Key-Value store operations.
  */
 @ApplicationScoped
+@WithSession
 public class KvService {
 
     private static final Logger LOG = Logger.getLogger(KvService.class);
@@ -38,225 +41,218 @@ public class KvService {
 
     // ==================== Bucket Operations ====================
 
-    @Transactional
-    public KvBucket createBucket(KvBucketDto.CreateRequest request) {
+    @WithTransaction
+    public Uni<KvBucket> createBucket(KvBucketDto.CreateRequest request) {
         LOG.debugf("Creating bucket: %s", request.name);
 
-        if (KvBucket.existsByName(request.name)) {
-            throw new ConflictException("Bucket already exists: " + request.name);
-        }
+        return KvBucket.existsByName(request.name)
+                .flatMap(exists -> {
+                    if (exists) {
+                        throw new ConflictException(
+                                "Bucket already exists: " + request.name);
+                    }
 
-        KvBucket bucket = new KvBucket();
-        bucket.name = request.name;
-        bucket.description = request.description;
-        bucket.maxValueSize = request.maxValueSize != null ? request.maxValueSize : maxValueSize;
-        bucket.maxHistoryPerKey = request.maxHistoryPerKey != null ? request.maxHistoryPerKey : maxHistorySize;
-        bucket.ttlSeconds = request.ttlSeconds;
-        bucket.persist();
+                    KvBucket bucket = new KvBucket();
+                    bucket.name = request.name;
+                    bucket.description = request.description;
+                    bucket.maxValueSize = request.maxValueSize != null ? request.maxValueSize : maxValueSize;
+                    bucket.maxHistoryPerKey = request.maxHistoryPerKey != null ? request.maxHistoryPerKey
+                            : maxHistorySize;
+                    bucket.ttlSeconds = request.ttlSeconds;
 
-        LOG.infof("Created bucket: %s (id=%s)", bucket.name, bucket.id);
-        return bucket;
+                    return bucket.<KvBucket>persist()
+                            .invoke(b -> LOG.infof("Created bucket: %s (id=%s)", b.name, b.id));
+                });
     }
 
-    public KvBucket getBucket(String name) {
-        KvBucket bucket = KvBucket.findByName(name);
-        if (bucket == null) {
-            throw new NotFoundException("Bucket not found: " + name);
-        }
-        return bucket;
+    public Uni<KvBucket> getBucket(String name) {
+        return KvBucket.findByName(name)
+                .onItem().ifNull()
+                .failWith(() -> new NotFoundException("Bucket not found: " + name));
     }
 
-    public List<KvBucket> listBuckets() {
+    public Uni<List<KvBucket>> listBuckets() {
         return KvBucket.listAll();
     }
 
-    @Transactional
-    public KvBucket updateBucket(String name, KvBucketDto.UpdateRequest request) {
-        KvBucket bucket = getBucket(name);
+    @WithTransaction
+    public Uni<KvBucket> updateBucket(String name, KvBucketDto.UpdateRequest request) {
+        return getBucket(name)
+                .flatMap(bucket -> {
+                    if (request.description != null) {
+                        bucket.description = request.description;
+                    }
+                    if (request.maxValueSize != null) {
+                        bucket.maxValueSize = request.maxValueSize;
+                    }
+                    if (request.maxHistoryPerKey != null) {
+                        bucket.maxHistoryPerKey = request.maxHistoryPerKey;
+                    }
+                    if (request.ttlSeconds != null) {
+                        bucket.ttlSeconds = request.ttlSeconds;
+                    }
 
-        if (request.description != null) {
-            bucket.description = request.description;
-        }
-        if (request.maxValueSize != null) {
-            bucket.maxValueSize = request.maxValueSize;
-        }
-        if (request.maxHistoryPerKey != null) {
-            bucket.maxHistoryPerKey = request.maxHistoryPerKey;
-        }
-        if (request.ttlSeconds != null) {
-            bucket.ttlSeconds = request.ttlSeconds;
-        }
-
-        bucket.persist();
-        LOG.infof("Updated bucket: %s", bucket.name);
-        return bucket;
+                    return bucket.<KvBucket>persist()
+                            .invoke(b -> LOG.infof("Updated bucket: %s", b.name));
+                });
     }
 
-    @Transactional
-    public void deleteBucket(String name) {
-        KvBucket bucket = getBucket(name);
-
-        // Delete all entries first (cascades via FK, but log it)
-        long deletedEntries = KvEntry.purgeByBucket(bucket.id);
-        LOG.infof("Deleted %d entries from bucket: %s", deletedEntries, name);
-
-        bucket.delete();
-        LOG.infof("Deleted bucket: %s", name);
+    @WithTransaction
+    public Uni<Void> deleteBucket(String name) {
+        return getBucket(name)
+                .flatMap(bucket -> KvEntry.purgeByBucket(bucket.id)
+                        .invoke(deleted -> LOG.infof("Deleted %d entries from bucket: %s", deleted, name))
+                        .replaceWith(bucket))
+                .flatMap(bucket -> bucket.delete())
+                .invoke(() -> LOG.infof("Deleted bucket: %s", name))
+                .replaceWithVoid();
     }
 
     // ==================== Key-Value Operations ====================
 
-    @Transactional
-    public KvEntry put(String bucketName, String key, KvEntryDto.PutRequest request) {
-        KvBucket bucket = getBucket(bucketName);
+    @WithTransaction
+    public Uni<KvEntry> put(String bucketName, String key, KvEntryDto.PutRequest request) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> {
+                    // Decode value
+                    byte[] value;
+                    if (request.base64) {
+                        try {
+                            value = Base64.getDecoder().decode(request.value);
+                        } catch (IllegalArgumentException e) {
+                            return Uni.createFrom().failure(
+                                    new ValidationException("Invalid base64 value"));
+                        }
+                    } else {
+                        value = request.value != null ? request.value.getBytes() : new byte[0];
+                    }
 
-        // Decode value
-        byte[] value;
-        if (request.base64) {
-            try {
-                value = Base64.getDecoder().decode(request.value);
-            } catch (IllegalArgumentException e) {
-                throw new ValidationException("Invalid base64 value");
-            }
-        } else {
-            value = request.value != null ? request.value.getBytes() : new byte[0];
-        }
+                    // Validate size
+                    if (value.length > bucket.maxValueSize) {
+                        return Uni.createFrom()
+                                .failure(new ValidationException(String.format(
+                                        "Value size (%d bytes) exceeds maximum (%d bytes)",
+                                        value.length, bucket.maxValueSize)));
+                    }
 
-        // Validate size
-        if (value.length > bucket.maxValueSize) {
-            throw new ValidationException(String.format(
-                    "Value size (%d bytes) exceeds maximum (%d bytes)",
-                    value.length, bucket.maxValueSize));
-        }
+                    final byte[] finalValue = value;
+                    return KvEntry.getLatestRevision(bucket.id, key)
+                            .flatMap(currentRevision -> {
+                                long nextRevision = currentRevision + 1;
 
-        // Get next revision
-        long currentRevision = KvEntry.getLatestRevision(bucket.id, key);
-        long nextRevision = currentRevision + 1;
+                                // Create entry
+                                KvEntry entry = new KvEntry();
+                                entry.bucketId = bucket.id;
+                                entry.key = key;
+                                entry.value = finalValue;
+                                entry.revision = nextRevision;
+                                entry.operation = Operation.PUT;
 
-        // Create entry
-        KvEntry entry = new KvEntry();
-        entry.bucketId = bucket.id;
-        entry.key = key;
-        entry.value = value;
-        entry.revision = nextRevision;
-        entry.operation = Operation.PUT;
+                                // Set TTL if specified
+                                if (request.ttlSeconds != null && request.ttlSeconds > 0) {
+                                    entry.expiresAt = OffsetDateTime.now().plusSeconds(request.ttlSeconds);
+                                } else if (bucket.ttlSeconds != null && bucket.ttlSeconds > 0) {
+                                    entry.expiresAt = OffsetDateTime.now().plusSeconds(bucket.ttlSeconds);
+                                }
 
-        // Set TTL if specified
-        if (request.ttlSeconds != null && request.ttlSeconds > 0) {
-            entry.expiresAt = OffsetDateTime.now().plusSeconds(request.ttlSeconds);
-        } else if (bucket.ttlSeconds != null && bucket.ttlSeconds > 0) {
-            entry.expiresAt = OffsetDateTime.now().plusSeconds(bucket.ttlSeconds);
-        }
-
-        entry.persist();
-
-        // Cleanup old revisions if needed
-        cleanupOldRevisions(bucket.id, key, bucket.maxHistoryPerKey);
-
-        LOG.debugf("Put key: %s/%s (revision=%d, size=%d)", bucketName, key, nextRevision, value.length);
-
-        // Notify watchers
-        watchService.notifyChange(KvEntryDto.WatchEvent.from(entry, bucketName));
-
-        return entry;
+                                return entry.<KvEntry>persist()
+                                        .flatMap(e -> cleanupOldRevisions(bucket.id, key, bucket.maxHistoryPerKey)
+                                                .replaceWith(e))
+                                        .invoke(e -> {
+                                            LOG.debugf("Put key: %s/%s (revision=%d, size=%d)", bucketName, key,
+                                                    nextRevision, finalValue.length);
+                                            // Notify watchers (fire and forget for now, or chained)
+                                            watchService.notifyChange(KvEntryDto.WatchEvent.from(e, bucketName));
+                                        });
+                            });
+                });
     }
 
-    public KvEntry get(String bucketName, String key) {
-        KvBucket bucket = getBucket(bucketName);
-        KvEntry entry = KvEntry.findLatest(bucket.id, key);
-
-        if (entry == null) {
-            throw new NotFoundException(String.format("Key not found: %s/%s", bucketName, key));
-        }
-
-        // Check if deleted
-        if (entry.operation == Operation.DELETE) {
-            throw new NotFoundException(String.format("Key deleted: %s/%s", bucketName, key));
-        }
-
-        return entry;
+    public Uni<KvEntry> get(String bucketName, String key) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> KvEntry.findLatest(bucket.id, key)
+                        .onItem().ifNull()
+                        .failWith(() -> new NotFoundException(String.format("Key not found: %s/%s", bucketName, key)))
+                        .invoke(entry -> {
+                            if (entry.operation == Operation.DELETE) {
+                                throw new NotFoundException(String.format("Key deleted: %s/%s", bucketName, key));
+                            }
+                        }));
     }
 
-    public KvEntry getRevision(String bucketName, String key, Long revision) {
-        KvBucket bucket = getBucket(bucketName);
-        KvEntry entry = KvEntry.findByRevision(bucket.id, key, revision);
-
-        if (entry == null) {
-            throw new NotFoundException(String.format(
-                    "Revision not found: %s/%s@%d", bucketName, key, revision));
-        }
-
-        return entry;
+    public Uni<KvEntry> getRevision(String bucketName, String key, Long revision) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> KvEntry.findByRevision(bucket.id, key, revision)
+                        .onItem().ifNull().failWith(() -> new NotFoundException(String.format(
+                                "Revision not found: %s/%s@%d", bucketName, key, revision))));
     }
 
-    public List<KvEntry> getHistory(String bucketName, String key, int limit) {
-        KvBucket bucket = getBucket(bucketName);
-        return KvEntry.findHistory(bucket.id, key, limit > 0 ? limit : bucket.maxHistoryPerKey);
+    public Uni<List<KvEntry>> getHistory(String bucketName, String key, int limit) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> KvEntry.findHistory(bucket.id, key, limit > 0 ? limit : bucket.maxHistoryPerKey));
     }
 
-    public List<String> listKeys(String bucketName) {
-        KvBucket bucket = getBucket(bucketName);
-        return KvEntry.findAllKeys(bucket.id);
+    public Uni<List<String>> listKeys(String bucketName) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> KvEntry.findAllKeys(bucket.id));
     }
 
-    @Transactional
-    public KvEntry delete(String bucketName, String key) {
-        KvBucket bucket = getBucket(bucketName);
+    @WithTransaction
+    public Uni<KvEntry> delete(String bucketName, String key) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> KvEntry.findLatest(bucket.id, key)
+                        .onItem().ifNull()
+                        .failWith(() -> new NotFoundException(String.format("Key not found: %s/%s", bucketName, key)))
+                        .flatMap(latest -> {
+                            // Create delete marker
+                            long nextRevision = latest.revision + 1;
+                            KvEntry deleteMarker = new KvEntry();
+                            deleteMarker.bucketId = bucket.id;
+                            deleteMarker.key = key;
+                            deleteMarker.value = null;
+                            deleteMarker.revision = nextRevision;
+                            deleteMarker.operation = Operation.DELETE;
 
-        // Check if key exists
-        KvEntry latest = KvEntry.findLatest(bucket.id, key);
-        if (latest == null) {
-            throw new NotFoundException(String.format("Key not found: %s/%s", bucketName, key));
-        }
-
-        // Create delete marker
-        long nextRevision = latest.revision + 1;
-        KvEntry deleteMarker = new KvEntry();
-        deleteMarker.bucketId = bucket.id;
-        deleteMarker.key = key;
-        deleteMarker.value = null;
-        deleteMarker.revision = nextRevision;
-        deleteMarker.operation = Operation.DELETE;
-        deleteMarker.persist();
-
-        LOG.debugf("Deleted key: %s/%s (revision=%d)", bucketName, key, nextRevision);
-
-        // Notify watchers
-        watchService.notifyChange(KvEntryDto.WatchEvent.from(deleteMarker, bucketName));
-
-        return deleteMarker;
+                            return deleteMarker.<KvEntry>persist()
+                                    .invoke(e -> {
+                                        LOG.debugf("Deleted key: %s/%s (revision=%d)", bucketName, key, nextRevision);
+                                        watchService.notifyChange(KvEntryDto.WatchEvent.from(e, bucketName));
+                                    });
+                        }));
     }
 
-    @Transactional
-    public long purge(String bucketName, String key) {
-        KvBucket bucket = getBucket(bucketName);
-        long deleted = KvEntry.deleteByKey(bucket.id, key);
-        LOG.infof("Purged key: %s/%s (deleted %d revisions)", bucketName, key, deleted);
-        return deleted;
+    @WithTransaction
+    public Uni<Long> purge(String bucketName, String key) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> KvEntry.deleteByKey(bucket.id, key)
+                        .invoke(deleted -> LOG.infof("Purged key: %s/%s (deleted %d revisions)", bucketName, key,
+                                deleted)));
     }
 
-    @Transactional
-    public long purgeBucket(String bucketName) {
-        KvBucket bucket = getBucket(bucketName);
-        long deleted = KvEntry.purgeByBucket(bucket.id);
-        LOG.infof("Purged bucket: %s (deleted %d entries)", bucketName, deleted);
-        return deleted;
+    @WithTransaction
+    public Uni<Long> purgeBucket(String bucketName) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> KvEntry.purgeByBucket(bucket.id)
+                        .invoke(deleted -> LOG.infof("Purged bucket: %s (deleted %d entries)", bucketName, deleted)));
     }
 
     // ==================== Private Methods ====================
 
-    @Transactional
-    void cleanupOldRevisions(java.util.UUID bucketId, String key, int maxHistory) {
-        List<KvEntry> entries = KvEntry.find(
-                "bucketId = ?1 AND key = ?2 ORDER BY revision DESC",
-                bucketId, key).list();
-
-        if (entries.size() > maxHistory) {
-            List<KvEntry> toDelete = entries.subList(maxHistory, entries.size());
-            for (KvEntry entry : toDelete) {
-                entry.delete();
-            }
-            LOG.debugf("Cleaned up %d old revisions for key: %s", toDelete.size(), key);
-        }
+    Uni<Void> cleanupOldRevisions(java.util.UUID bucketId, String key, int maxHistory) {
+        return KvEntry.find("bucketId = ?1 AND key = ?2 ORDER BY revision DESC", bucketId, key)
+                .list()
+                .flatMap(entries -> {
+                    if (entries.size() > maxHistory) {
+                        List<KvEntry> toDelete = entries.stream()
+                                .skip(maxHistory)
+                                .map(e -> (KvEntry) e)
+                                .collect(Collectors.toList());
+                        return Uni.combine().all().unis(
+                                toDelete.stream().map(e -> e.delete()).collect(Collectors.toList())).discardItems()
+                                .invoke(() -> LOG.debugf("Cleaned up %d old revisions for key: %s", toDelete.size(),
+                                        key));
+                    }
+                    return Uni.createFrom().voidItem();
+                });
     }
 }

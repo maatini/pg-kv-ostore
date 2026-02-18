@@ -32,6 +32,7 @@ class KvWatchServiceTest {
 
     @BeforeEach
     void setUp() {
+        watchService.clear();
         mockSession = mock(Session.class);
         mockAsync = mock(RemoteEndpoint.Async.class);
         when(mockSession.getId()).thenReturn("test-session-1");

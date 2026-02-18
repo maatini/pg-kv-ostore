@@ -1,6 +1,7 @@
 package space.maatini.kvstore.entity;
 
-import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
+import io.quarkus.hibernate.reactive.panache.PanacheEntityBase;
+import io.smallrye.mutiny.Uni;
 import jakarta.persistence.*;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -58,44 +59,41 @@ public class KvEntry extends PanacheEntityBase {
     }
 
     // Panache Finder Methods
-    public static KvEntry findLatest(UUID bucketId, String key) {
+    public static Uni<KvEntry> findLatest(UUID bucketId, String key) {
         return find("bucketId = ?1 AND key = ?2 ORDER BY revision DESC", bucketId, key)
                 .firstResult();
     }
 
-    public static KvEntry findByRevision(UUID bucketId, String key, Long revision) {
+    public static Uni<KvEntry> findByRevision(UUID bucketId, String key, Long revision) {
         return find("bucketId = ?1 AND key = ?2 AND revision = ?3", bucketId, key, revision)
                 .firstResult();
     }
 
-    public static List<KvEntry> findHistory(UUID bucketId, String key, int limit) {
+    public static Uni<List<KvEntry>> findHistory(UUID bucketId, String key, int limit) {
         return find("bucketId = ?1 AND key = ?2 ORDER BY revision DESC", bucketId, key)
                 .page(0, limit)
                 .list();
     }
 
-    public static List<String> findAllKeys(UUID bucketId) {
-        return getEntityManager()
-                .createNamedQuery("KvEntry.findAllKeysByBucket", String.class)
-                .setParameter("bucketId", bucketId)
-                .getResultList();
+    public static Uni<List<String>> findAllKeys(UUID bucketId) {
+        return find("SELECT DISTINCT e.key FROM KvEntry e WHERE e.bucketId = ?1", bucketId)
+                .project(String.class)
+                .list();
     }
 
-    public static long deleteByKey(UUID bucketId, String key) {
+    public static Uni<Long> deleteByKey(UUID bucketId, String key) {
         return delete("bucketId = ?1 AND key = ?2", bucketId, key);
     }
 
-    public static long purgeByBucket(UUID bucketId) {
+    public static Uni<Long> purgeByBucket(UUID bucketId) {
         return delete("bucketId", bucketId);
     }
 
-    public static long getLatestRevision(UUID bucketId, String key) {
-        Long rev = getEntityManager()
-                .createQuery("SELECT MAX(e.revision) FROM KvEntry e WHERE e.bucketId = :bucketId AND e.key = :key",
-                        Long.class)
-                .setParameter("bucketId", bucketId)
-                .setParameter("key", key)
-                .getSingleResult();
-        return rev != null ? rev : 0L;
+    public static Uni<Long> getLatestRevision(UUID bucketId, String key) {
+        return find("SELECT MAX(e.revision) FROM KvEntry e WHERE e.bucketId = ?1 AND e.key = ?2",
+                bucketId, key)
+                .project(Long.class)
+                .firstResult()
+                .map(rev -> rev != null ? rev : 0L);
     }
 }

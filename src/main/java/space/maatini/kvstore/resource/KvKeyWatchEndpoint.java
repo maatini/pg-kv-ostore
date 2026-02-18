@@ -91,17 +91,21 @@ public class KvKeyWatchEndpoint {
     }
 
     private void replayKeyHistory(Session session, String bucket, String key, long since) {
-        try {
-            List<KvEntry> history = kvService.getHistory(bucket, key, 100);
-            for (KvEntry entry : history) {
-                if (entry.revision > since) {
-                    KvEntryDto.WatchEvent event = KvEntryDto.WatchEvent.from(entry, bucket);
-                    session.getBasicRemote().sendText(
-                            new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(event));
-                }
-            }
-        } catch (Exception e) {
-            LOG.error("Failed to replay key history", e);
-        }
+        kvService.getHistory(bucket, key, 100)
+                .subscribe().with(
+                        history -> {
+                            try {
+                                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                                for (KvEntry entry : history) {
+                                    if (entry.revision > since) {
+                                        KvEntryDto.WatchEvent event = KvEntryDto.WatchEvent.from(entry, bucket);
+                                        session.getAsyncRemote().sendText(mapper.writeValueAsString(event));
+                                    }
+                                }
+                            } catch (Exception e) {
+                                LOG.error("Failed to replay key history", e);
+                            }
+                        },
+                        error -> LOG.error("Error fetching history for replay", error));
     }
 }

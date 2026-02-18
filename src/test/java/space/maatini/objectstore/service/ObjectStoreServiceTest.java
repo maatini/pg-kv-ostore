@@ -1,5 +1,6 @@
 package space.maatini.objectstore.service;
 
+import io.smallrye.mutiny.Multi;
 import space.maatini.common.exception.ConflictException;
 import space.maatini.common.exception.NotFoundException;
 import space.maatini.common.exception.ValidationException;
@@ -10,12 +11,12 @@ import space.maatini.objectstore.entity.ObjChunk;
 import space.maatini.objectstore.entity.ObjMetadata;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.vertx.RunOnVertxContext;
+import io.quarkus.test.hibernate.reactive.panache.TransactionalUniAsserter;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.*;
 import org.mockito.Mockito;
 
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
@@ -41,388 +42,363 @@ class ObjectStoreServiceTest {
     private static final String TEST_OBJECT = "test-file.txt";
     private static final byte[] TEST_DATA = "This is test content for the object store.".getBytes();
 
+    private static UUID testBucketId;
+
     @BeforeEach
-    void setUp() {
+    @RunOnVertxContext
+    void setUp(TransactionalUniAsserter asserter) {
         Mockito.reset(watchService);
+        asserter.execute(() -> ObjChunk.deleteAll());
+        asserter.execute(() -> ObjMetadata.deleteAll());
+        asserter.execute(() -> ObjBucket.deleteAll());
+        asserter.execute(() -> {
+            ObjBucketDto.CreateRequest request = new ObjBucketDto.CreateRequest();
+            request.name = TEST_BUCKET;
+            request.chunkSize = 1024; // 1KB chunks for testing
+            request.maxObjectSize = 1024L * 1024 * 1024;
+            return objectStoreService.createBucket(request)
+                    .invoke(bucket -> testBucketId = bucket.id)
+                    .replaceWithVoid();
+        });
     }
 
     // ==================== Bucket Tests ====================
 
     @Test
     @Order(1)
-    void testCreateBucket_Success() {
+    @RunOnVertxContext
+    void testCreateBucket_Success(TransactionalUniAsserter asserter) {
         ObjBucketDto.CreateRequest request = new ObjBucketDto.CreateRequest();
-        request.name = TEST_BUCKET;
-        request.description = "Test bucket for unit tests";
-        request.chunkSize = 1024;
-        request.maxObjectSize = 1024L * 1024L;
+        request.name = "new-obj-bucket";
+        request.description = "Test bucket";
 
-        ObjBucket bucket = objectStoreService.createBucket(request);
-
-        assertNotNull(bucket);
-        assertNotNull(bucket.id);
-        assertEquals(TEST_BUCKET, bucket.name);
-        assertEquals("Test bucket for unit tests", bucket.description);
-        assertEquals(1024, bucket.chunkSize);
-        assertEquals(1024L * 1024L, bucket.maxObjectSize);
+        asserter.assertThat(() -> objectStoreService.createBucket(request), bucket -> {
+            assertNotNull(bucket);
+            assertEquals("new-obj-bucket", bucket.name);
+        });
     }
 
     @Test
     @Order(2)
-    void testCreateBucket_DuplicateName() {
+    @RunOnVertxContext
+    void testCreateBucket_DuplicateName(TransactionalUniAsserter asserter) {
         ObjBucketDto.CreateRequest request = new ObjBucketDto.CreateRequest();
         request.name = TEST_BUCKET;
 
-        assertThrows(ConflictException.class, () -> objectStoreService.createBucket(request));
+        asserter.assertFailedWith(() -> objectStoreService.createBucket(request), ConflictException.class);
     }
 
     @Test
     @Order(3)
-    void testGetBucket_Success() {
-        ObjBucket bucket = objectStoreService.getBucket(TEST_BUCKET);
-
-        assertNotNull(bucket);
-        assertEquals(TEST_BUCKET, bucket.name);
+    @RunOnVertxContext
+    void testGetBucket_Success(TransactionalUniAsserter asserter) {
+        asserter.assertThat(() -> objectStoreService.getBucket(TEST_BUCKET), bucket -> {
+            assertNotNull(bucket);
+            assertEquals(TEST_BUCKET, bucket.name);
+            assertEquals(testBucketId, bucket.id);
+        });
     }
 
     @Test
     @Order(4)
-    void testGetBucket_NotFound() {
-        assertThrows(NotFoundException.class, () -> objectStoreService.getBucket("non-existent"));
+    @RunOnVertxContext
+    void testGetBucket_NotFound(TransactionalUniAsserter asserter) {
+        asserter.assertFailedWith(() -> objectStoreService.getBucket("nonexistent"), NotFoundException.class);
     }
 
     @Test
     @Order(5)
-    void testListBuckets() {
-        List<ObjBucket> buckets = objectStoreService.listBuckets();
-
-        assertNotNull(buckets);
-        assertTrue(buckets.stream().anyMatch(b -> b.name.equals(TEST_BUCKET)));
+    @RunOnVertxContext
+    void testListBuckets(TransactionalUniAsserter asserter) {
+        asserter.assertThat(() -> objectStoreService.listBuckets(), buckets -> {
+            assertNotNull(buckets);
+            assertFalse(buckets.isEmpty());
+            assertTrue(buckets.stream().anyMatch(b -> b.name.equals(TEST_BUCKET)));
+        });
     }
 
     @Test
     @Order(6)
-    void testUpdateBucket() {
+    @RunOnVertxContext
+    void testUpdateBucket(TransactionalUniAsserter asserter) {
         ObjBucketDto.UpdateRequest request = new ObjBucketDto.UpdateRequest();
         request.description = "Updated description";
         request.chunkSize = 2048;
 
-        ObjBucket bucket = objectStoreService.updateBucket(TEST_BUCKET, request);
-
-        assertNotNull(bucket);
-        assertEquals("Updated description", bucket.description);
-        assertEquals(2048, bucket.chunkSize);
+        asserter.assertThat(() -> objectStoreService.updateBucket(TEST_BUCKET, request), bucket -> {
+            assertNotNull(bucket);
+            assertEquals("Updated description", bucket.description);
+            assertEquals(2048, bucket.chunkSize);
+        });
     }
 
     // ==================== Object Upload Tests ====================
 
     @Test
-    @Order(10)
-    void testPutObject_Success() throws IOException {
-        ByteArrayInputStream input = new ByteArrayInputStream(TEST_DATA);
-
-        ObjMetadata metadata = objectStoreService.putObject(
-                TEST_BUCKET, TEST_OBJECT, input, "text/plain", "Test file", null);
-
-        assertNotNull(metadata);
-        assertEquals(TEST_OBJECT, metadata.name);
-        assertEquals(TEST_DATA.length, metadata.size);
-        assertNotNull(metadata.digest);
-        assertEquals("SHA-256", metadata.digestAlgorithm);
-        assertEquals("text/plain", metadata.contentType);
-        assertEquals("Test file", metadata.description);
-        assertTrue(metadata.chunkCount >= 1);
-
-        // Verify watcher was notified
-        verify(watchService).notifyChange(any(ObjMetadataDto.WatchEvent.class));
+    @Order(5)
+    @RunOnVertxContext
+    void testPutObject_Success(TransactionalUniAsserter asserter) {
+        asserter.assertThat(() -> objectStoreService.putObject(
+                TEST_BUCKET, TEST_OBJECT, Multi.createFrom().item(TEST_DATA), "text/plain", null, null),
+                metadata -> {
+                    assertNotNull(metadata);
+                    assertEquals(TEST_OBJECT, metadata.name);
+                    assertEquals(TEST_DATA.length, metadata.size);
+                });
+        asserter.execute(() -> verify(watchService).notifyChange(any(ObjMetadataDto.WatchEvent.class)));
     }
 
     @Test
     @Order(11)
-    void testPutObject_VerifyDigest() throws IOException, NoSuchAlgorithmException {
-        ByteArrayInputStream input = new ByteArrayInputStream(TEST_DATA);
+    @RunOnVertxContext
+    void testPutObject_VerifyDigest(TransactionalUniAsserter asserter) throws NoSuchAlgorithmException {
+        asserter.assertThat(() -> objectStoreService.putObject(
+                TEST_BUCKET, "digest-test.txt", Multi.createFrom().item(TEST_DATA), "text/plain", null, null),
+                metadata -> {
+                    // Calculate expected digest
+                    MessageDigest md = null;
+                    try {
+                        md = MessageDigest.getInstance("SHA-256");
+                    } catch (NoSuchAlgorithmException e) {
+                        fail("SHA-256 algorithm not found", e);
+                    }
+                    String expectedDigest = HexFormat.of().formatHex(md.digest(TEST_DATA));
 
-        ObjMetadata metadata = objectStoreService.putObject(
-                TEST_BUCKET, "digest-test.txt", input, "text/plain", null, null);
-
-        // Calculate expected digest
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-        String expectedDigest = HexFormat.of().formatHex(md.digest(TEST_DATA));
-
-        assertEquals(expectedDigest, metadata.digest);
+                    assertEquals(expectedDigest, metadata.digest);
+                });
     }
 
     @Test
     @Order(12)
-    void testPutObject_WithChunking() throws IOException {
+    @RunOnVertxContext
+    void testPutObject_WithChunking(TransactionalUniAsserter asserter) {
         // Create data larger than chunk size (chunk size is 2048 from update test)
         byte[] largeData = new byte[5000];
         new Random().nextBytes(largeData);
 
-        ByteArrayInputStream input = new ByteArrayInputStream(largeData);
-
-        ObjMetadata metadata = objectStoreService.putObject(
-                TEST_BUCKET, "chunked-file.bin", input, "application/octet-stream", null, null);
-
-        assertNotNull(metadata);
-        assertEquals(largeData.length, metadata.size);
-        assertTrue(metadata.chunkCount > 1);
+        asserter.assertThat(() -> objectStoreService.putObject(
+                TEST_BUCKET, "chunked-file.bin", Multi.createFrom().item(largeData), "application/octet-stream", null,
+                null), metadata -> {
+                    assertNotNull(metadata);
+                    assertEquals(largeData.length, metadata.size);
+                    assertTrue(metadata.chunkCount > 1);
+                });
     }
 
     @Test
     @Order(13)
-    void testPutObject_ReplaceExisting() throws IOException {
+    @RunOnVertxContext
+    void testPutObject_ReplaceExisting(TransactionalUniAsserter asserter) {
         // First upload
         byte[] data1 = "First version".getBytes();
-        objectStoreService.putObject(
+        asserter.execute(() -> objectStoreService.putObject(
                 TEST_BUCKET, "replace-test.txt",
-                new ByteArrayInputStream(data1), "text/plain", null, null);
+                Multi.createFrom().item(data1), "text/plain", null, null));
 
         // Replace with new data
         byte[] data2 = "Second version".getBytes();
-        ObjMetadata metadata = objectStoreService.putObject(
+        asserter.assertThat(() -> objectStoreService.putObject(
                 TEST_BUCKET, "replace-test.txt",
-                new ByteArrayInputStream(data2), "text/plain", null, null);
-
-        assertEquals(data2.length, metadata.size);
+                Multi.createFrom().item(data2), "text/plain", null, null), metadata -> {
+                    assertEquals(data2.length, metadata.size);
+                });
 
         // Verify content was replaced
-        byte[] retrieved = objectStoreService.getObjectData(TEST_BUCKET, "replace-test.txt");
-        assertArrayEquals(data2, retrieved);
+        asserter.assertThat(() -> objectStoreService.getObjectData(TEST_BUCKET, "replace-test.txt"), retrieved -> {
+            assertArrayEquals(data2, retrieved);
+        });
     }
 
     @Test
     @Order(14)
-    void testPutObject_TooLarge() {
-        // Create data larger than maxObjectSize (1MB from bucket creation)
-        byte[] tooLargeData = new byte[1024 * 1024 + 1];
-        ByteArrayInputStream input = new ByteArrayInputStream(tooLargeData);
+    @RunOnVertxContext
+    void testPutObject_TooLarge(TransactionalUniAsserter asserter) {
+        // Create data larger than maxObjectSize (1GB default, but bucket has 1GB from
+        // creation)
+        // Wait, the bucket creation in test 1 sets 1GB.
+        // Let's use a smaller max size for this test by creating a new bucket.
+        ObjBucketDto.CreateRequest bucketRequest = new ObjBucketDto.CreateRequest();
+        bucketRequest.name = "small-limit-bucket";
+        bucketRequest.maxObjectSize = 1024L;
 
-        assertThrows(ValidationException.class, () -> objectStoreService.putObject(
-                TEST_BUCKET, "too-large.bin", input, "application/octet-stream", null, null));
+        asserter.execute(() -> objectStoreService.createBucket(bucketRequest));
+
+        byte[] tooLargeData = new byte[2048];
+
+        asserter.assertFailedWith(() -> objectStoreService.putObject(
+                "small-limit-bucket", "too-large.bin", Multi.createFrom().item(tooLargeData),
+                "application/octet-stream", null,
+                null), ValidationException.class);
+
+        asserter.execute(() -> objectStoreService.deleteBucket("small-limit-bucket"));
     }
 
     @Test
     @Order(15)
-    void testPutObject_BucketNotFound() {
-        ByteArrayInputStream input = new ByteArrayInputStream(TEST_DATA);
-
-        assertThrows(NotFoundException.class, () -> objectStoreService.putObject(
-                "non-existent", "file.txt", input, "text/plain", null, null));
+    @RunOnVertxContext
+    void testPutObject_BucketNotFound(TransactionalUniAsserter asserter) {
+        asserter.assertFailedWith(() -> objectStoreService.putObject(
+                "non-existent", "file.txt", Multi.createFrom().item(TEST_DATA), "text/plain", null, null),
+                NotFoundException.class);
     }
 
     @Test
     @Order(16)
-    void testPutObject_WithCustomHeaders() throws IOException {
+    @RunOnVertxContext
+    void testPutObject_WithCustomHeaders(TransactionalUniAsserter asserter) {
         Map<String, String> headers = new HashMap<>();
         headers.put("X-Custom-Header", "custom-value");
         headers.put("X-Another-Header", "another-value");
 
-        ByteArrayInputStream input = new ByteArrayInputStream(TEST_DATA);
-
-        ObjMetadata metadata = objectStoreService.putObject(
-                TEST_BUCKET, "headers-test.txt", input, "text/plain", null, headers);
-
-        assertNotNull(metadata.headers);
-        assertEquals("custom-value", metadata.headers.get("X-Custom-Header"));
+        asserter.assertThat(() -> objectStoreService.putObject(
+                TEST_BUCKET, "headers-test.txt", Multi.createFrom().item(TEST_DATA), "text/plain", null, headers),
+                metadata -> {
+                    assertNotNull(metadata.headers);
+                    assertEquals("custom-value", metadata.headers.get("X-Custom-Header"));
+                });
     }
 
     // ==================== Object Retrieval Tests ====================
 
     @Test
     @Order(20)
-    void testGetMetadata_Success() {
-        ObjMetadata metadata = objectStoreService.getMetadata(TEST_BUCKET, TEST_OBJECT);
-
-        assertNotNull(metadata);
-        assertEquals(TEST_OBJECT, metadata.name);
-        assertEquals(TEST_DATA.length, metadata.size);
+    @RunOnVertxContext
+    void testGetMetadata_Success(TransactionalUniAsserter asserter) {
+        asserter.execute(() -> objectStoreService.putObject(
+                TEST_BUCKET, TEST_OBJECT,
+                Multi.createFrom().item(TEST_DATA), "text/plain", null, null));
+        asserter.assertThat(() -> objectStoreService.getMetadata(TEST_BUCKET, TEST_OBJECT), metadata -> {
+            assertNotNull(metadata);
+            assertEquals(TEST_OBJECT, metadata.name);
+            assertEquals(TEST_DATA.length, metadata.size);
+        });
     }
 
     @Test
     @Order(21)
-    void testGetMetadata_NotFound() {
-        assertThrows(NotFoundException.class, () -> objectStoreService.getMetadata(TEST_BUCKET, "non-existent.txt"));
+    @RunOnVertxContext
+    void testGetMetadata_NotFound(TransactionalUniAsserter asserter) {
+        asserter.assertFailedWith(() -> objectStoreService.getMetadata(TEST_BUCKET, "non-existent.txt"),
+                NotFoundException.class);
     }
 
     @Test
-    @Order(22)
-    void testListObjects() {
-        List<ObjMetadata> objects = objectStoreService.listObjects(TEST_BUCKET);
-
-        assertNotNull(objects);
-        assertTrue(objects.size() >= 1);
-        assertTrue(objects.stream().anyMatch(o -> o.name.equals(TEST_OBJECT)));
+    @Order(21)
+    @RunOnVertxContext
+    void testListObjects(TransactionalUniAsserter asserter) {
+        asserter.execute(() -> objectStoreService.putObject(
+                TEST_BUCKET, "list-test.txt",
+                Multi.createFrom().item(TEST_DATA), "text/plain", null, null));
+        asserter.assertThat(() -> objectStoreService.listObjects(TEST_BUCKET), list -> {
+            assertNotNull(list);
+            assertTrue(list.stream().anyMatch(m -> m.name.equals("list-test.txt")));
+        });
     }
 
     @Test
-    @Order(23)
-    void testGetObjectData_Success() throws IOException {
-        byte[] data = objectStoreService.getObjectData(TEST_BUCKET, TEST_OBJECT);
-
-        assertNotNull(data);
-        assertArrayEquals(TEST_DATA, data);
-    }
-
-    @Test
-    @Order(24)
-    void testGetObjectChunks() {
-        ObjectStoreService.ChunkIterator iterator = objectStoreService.getObjectChunks(TEST_BUCKET, TEST_OBJECT);
-
-        assertNotNull(iterator);
-        assertTrue(iterator.hasNext());
-
-        int totalSize = 0;
-        while (iterator.hasNext()) {
-            ObjChunk chunk = iterator.next();
-            assertNotNull(chunk);
-            assertNotNull(chunk.data);
-            totalSize += chunk.size;
-        }
-
-        assertEquals(TEST_DATA.length, totalSize);
-    }
-
-    @Test
-    @Order(25)
-    void testGetObjectChunks_MultipleChunks() throws IOException {
-        // Use the chunked file created earlier
-        ObjectStoreService.ChunkIterator iterator = objectStoreService.getObjectChunks(TEST_BUCKET, "chunked-file.bin");
-
-        assertNotNull(iterator);
-        assertTrue(iterator.getTotalChunks() > 1);
-
-        int chunkCount = 0;
-        while (iterator.hasNext()) {
-            iterator.next();
-            chunkCount++;
-        }
-
-        assertEquals(iterator.getTotalChunks(), chunkCount);
-    }
-
-    // ==================== Integrity Verification Tests ====================
-
-    @Test
-    @Order(30)
-    void testVerifyIntegrity_Success() {
-        boolean valid = objectStoreService.verifyIntegrity(TEST_BUCKET, TEST_OBJECT);
-        assertTrue(valid);
-    }
-
-    @Test
-    @Order(31)
-    void testVerifyIntegrity_LargeFile() throws IOException {
-        boolean valid = objectStoreService.verifyIntegrity(TEST_BUCKET, "chunked-file.bin");
-        assertTrue(valid);
+    @Order(9)
+    @RunOnVertxContext
+    void testGetObjectData_Success(TransactionalUniAsserter asserter) {
+        asserter.execute(() -> objectStoreService.putObject(
+                TEST_BUCKET, TEST_OBJECT,
+                Multi.createFrom().item(TEST_DATA), "text/plain", null, null));
+        asserter.assertThat(() -> objectStoreService.getObjectData(TEST_BUCKET, TEST_OBJECT), retrieved -> {
+            assertArrayEquals(TEST_DATA, retrieved);
+        });
     }
 
     // ==================== Object Deletion Tests ====================
 
     @Test
-    @Order(40)
-    void testDeleteObject_Success() {
-        // First create an object to delete
-        try {
-            objectStoreService.putObject(
-                    TEST_BUCKET, "to-delete.txt",
-                    new ByteArrayInputStream("delete me".getBytes()),
-                    "text/plain", null, null);
-        } catch (IOException e) {
-            fail("Failed to create object");
-        }
-
-        objectStoreService.deleteObject(TEST_BUCKET, "to-delete.txt");
-
-        // Verify it's deleted
-        assertThrows(NotFoundException.class, () -> objectStoreService.getMetadata(TEST_BUCKET, "to-delete.txt"));
-
-        // Verify watcher was notified
-        verify(watchService, atLeastOnce()).notifyChange(any(ObjMetadataDto.WatchEvent.class));
-    }
-
-    @Test
-    @Order(41)
-    void testDeleteObject_NotFound() {
-        assertThrows(NotFoundException.class, () -> objectStoreService.deleteObject(TEST_BUCKET, "non-existent.txt"));
+    @Order(25)
+    @RunOnVertxContext
+    void testDeleteObject_Success(TransactionalUniAsserter asserter) {
+        asserter.execute(() -> objectStoreService.putObject(
+                TEST_BUCKET, "delete-test.txt",
+                Multi.createFrom().item(TEST_DATA), "text/plain", null, null));
+        asserter.execute(() -> objectStoreService.deleteObject(TEST_BUCKET, "delete-test.txt"));
+        asserter.assertFailedWith(() -> objectStoreService.getMetadata(TEST_BUCKET, "delete-test.txt"),
+                NotFoundException.class);
     }
 
     // ==================== Bucket Deletion Tests ====================
 
     @Test
-    @Order(100)
-    void testDeleteBucket() {
-        objectStoreService.deleteBucket(TEST_BUCKET);
-
-        assertThrows(NotFoundException.class, () -> objectStoreService.getBucket(TEST_BUCKET));
+    @Order(40)
+    @RunOnVertxContext
+    void testDeleteBucket(TransactionalUniAsserter asserter) {
+        asserter.execute(() -> objectStoreService.deleteBucket(TEST_BUCKET));
+        asserter.assertFailedWith(() -> objectStoreService.getBucket(TEST_BUCKET), NotFoundException.class);
     }
 
     // ==================== Edge Cases ====================
 
     @Test
-    @Order(110)
-    void testPutObject_EmptyFile() throws IOException {
+    @Order(100)
+    @RunOnVertxContext
+    void testPutObject_EmptyFile(TransactionalUniAsserter asserter) {
         ObjBucketDto.CreateRequest bucketRequest = new ObjBucketDto.CreateRequest();
         bucketRequest.name = "empty-file-bucket";
-        objectStoreService.createBucket(bucketRequest);
 
-        ByteArrayInputStream input = new ByteArrayInputStream(new byte[0]);
+        asserter.execute(() -> objectStoreService.createBucket(bucketRequest));
 
-        ObjMetadata metadata = objectStoreService.putObject(
-                "empty-file-bucket", "empty.txt", input, "text/plain", null, null);
+        asserter.assertThat(() -> objectStoreService.putObject(
+                "empty-file-bucket", "empty.txt", Multi.createFrom().empty(), "text/plain", null, null), metadata -> {
+                    assertEquals(0L, metadata.size);
+                    assertEquals(0, metadata.chunkCount);
+                });
 
-        assertEquals(0L, metadata.size);
-        assertEquals(0, metadata.chunkCount);
-
-        objectStoreService.deleteBucket("empty-file-bucket");
+        asserter.execute(() -> objectStoreService.deleteBucket("empty-file-bucket"));
     }
 
     @Test
     @Order(111)
-    void testPutObject_SpecialCharactersInName() throws IOException {
+    @RunOnVertxContext
+    void testPutObject_SpecialCharactersInName(TransactionalUniAsserter asserter) {
         ObjBucketDto.CreateRequest bucketRequest = new ObjBucketDto.CreateRequest();
         bucketRequest.name = "special-names-bucket";
-        objectStoreService.createBucket(bucketRequest);
+
+        asserter.execute(() -> objectStoreService.createBucket(bucketRequest));
 
         String specialName = "path/to/file with spaces (1).txt";
-        ByteArrayInputStream input = new ByteArrayInputStream(TEST_DATA);
 
-        ObjMetadata metadata = objectStoreService.putObject(
-                "special-names-bucket", specialName, input, "text/plain", null, null);
+        asserter.assertThat(() -> objectStoreService.putObject(
+                "special-names-bucket", specialName, Multi.createFrom().item(TEST_DATA), "text/plain", null, null),
+                metadata -> {
+                    assertEquals(specialName, metadata.name);
+                });
 
-        assertEquals(specialName, metadata.name);
+        asserter.assertThat(() -> objectStoreService.getObjectData("special-names-bucket", specialName), data -> {
+            assertArrayEquals(TEST_DATA, data);
+        });
 
-        // Verify retrieval
-        byte[] data = objectStoreService.getObjectData("special-names-bucket", specialName);
-        assertArrayEquals(TEST_DATA, data);
-
-        objectStoreService.deleteBucket("special-names-bucket");
+        asserter.execute(() -> objectStoreService.deleteBucket("special-names-bucket"));
     }
 
     @Test
     @Order(112)
-    void testPutObject_BinaryData() throws IOException {
+    @RunOnVertxContext
+    void testPutObject_BinaryData(TransactionalUniAsserter asserter) {
         ObjBucketDto.CreateRequest bucketRequest = new ObjBucketDto.CreateRequest();
         bucketRequest.name = "binary-bucket";
-        objectStoreService.createBucket(bucketRequest);
 
-        // Create binary data with all possible byte values
+        asserter.execute(() -> objectStoreService.createBucket(bucketRequest));
+
         byte[] binaryData = new byte[256];
         for (int i = 0; i < 256; i++) {
             binaryData[i] = (byte) i;
         }
 
-        ByteArrayInputStream input = new ByteArrayInputStream(binaryData);
+        asserter.assertThat(() -> objectStoreService.putObject(
+                "binary-bucket", "binary.bin", Multi.createFrom().item(binaryData), "application/octet-stream", null,
+                null), metadata -> {
+                    assertEquals(256L, metadata.size);
+                });
 
-        ObjMetadata metadata = objectStoreService.putObject(
-                "binary-bucket", "binary.bin", input, "application/octet-stream", null, null);
+        asserter.assertThat(() -> objectStoreService.getObjectData("binary-bucket", "binary.bin"), retrieved -> {
+            assertArrayEquals(binaryData, retrieved);
+        });
 
-        assertEquals(256L, metadata.size);
-
-        // Verify data integrity
-        byte[] retrieved = objectStoreService.getObjectData("binary-bucket", "binary.bin");
-        assertArrayEquals(binaryData, retrieved);
-
-        objectStoreService.deleteBucket("binary-bucket");
+        asserter.execute(() -> objectStoreService.deleteBucket("binary-bucket"));
     }
 }

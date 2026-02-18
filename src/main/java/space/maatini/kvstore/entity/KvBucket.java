@@ -1,6 +1,7 @@
 package space.maatini.kvstore.entity;
 
-import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
+import io.quarkus.hibernate.reactive.panache.PanacheEntityBase;
+import io.smallrye.mutiny.Uni;
 import jakarta.persistence.*;
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -51,11 +52,11 @@ public class KvBucket extends PanacheEntityBase {
     }
 
     // Panache Finder Methods
-    public static KvBucket findByName(String name) {
+    public static Uni<KvBucket> findByName(String name) {
         return find("name", name).firstResult();
     }
 
-    public static boolean existsByName(String name) {
-        return count("name", name) > 0;
+    public static Uni<Boolean> existsByName(String name) {
+        return count("name", name).map(count -> count > 0);
     }
 }

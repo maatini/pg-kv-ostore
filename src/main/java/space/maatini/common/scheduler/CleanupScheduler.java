@@ -1,13 +1,14 @@
 package space.maatini.common.scheduler;
 
+import io.smallrye.mutiny.Uni;
 import space.maatini.kvstore.entity.KvEntry;
 import io.quarkus.scheduler.Scheduled;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.transaction.Transactional;
 import org.jboss.logging.Logger;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Scheduled tasks for cleanup and maintenance.
@@ -22,22 +23,26 @@ public class CleanupScheduler {
      * Runs every hour by default.
      */
     @Scheduled(every = "${kv.cleanup-interval:1h}")
-    @Transactional
-    public void cleanupExpiredEntries() {
+    @io.quarkus.hibernate.reactive.panache.common.WithSession
+    public Uni<Void> cleanupExpiredEntries() {
         LOG.debug("Running expired entries cleanup");
 
         OffsetDateTime now = OffsetDateTime.now();
-        List<KvEntry> expired = KvEntry.getEntityManager()
-                .createNamedQuery("KvEntry.findExpired", KvEntry.class)
-                .setParameter("now", now)
-                .getResultList();
+        return KvEntry.find("expiresAt IS NOT NULL AND expiresAt < ?1", now)
+                .list()
+                .flatMap(expired -> {
+                    if (expired.isEmpty()) {
+                        return Uni.createFrom().voidItem();
+                    }
 
-        if (!expired.isEmpty()) {
-            for (KvEntry entry : expired) {
-                entry.delete();
-            }
-            LOG.infof("Cleaned up %d expired entries", expired.size());
-        }
+                    List<Uni<?>> deleteUnis = expired.stream()
+                            .map(e -> ((KvEntry) e).delete())
+                            .collect(Collectors.toList());
+
+                    return Uni.combine().all().unis(deleteUnis)
+                            .discardItems()
+                            .invoke(() -> LOG.infof("Cleaned up %d expired entries", expired.size()));
+                });
     }
 
     /**
