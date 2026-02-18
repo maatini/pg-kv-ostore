@@ -302,36 +302,59 @@ Für Produktions-Deployments mit hoher Verfügbarkeit:
 
 ## Architektur
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     REST API Layer                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────────────┐  │
-│  │ KV Bucket   │  │ KV Entry    │  │ Object Store       │  │
-│  │ Resource    │  │ Resource    │  │ Resources          │  │
-│  └─────────────┘  └─────────────┘  └────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                    WebSocket Layer                          │
-│  ┌─────────────────────────┐  ┌─────────────────────────┐  │
-│  │ KV Watch Endpoint       │  │ Object Watch Endpoint   │  │
-│  └─────────────────────────┘  └─────────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                     Service Layer (Mutiny)                  │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────────────┐  │
-│  │ KV Service  │  │ KV Watch    │  │ Object Store       │  │
-│  │             │  │ Service     │  │ Service            │  │
-│  └─────────────┘  └─────────────┘  └────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│               Entity Layer (Hibernate Reactive)             │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────────────┐  │
-│  │ KvBucket    │  │ KvEntry     │  │ ObjMetadata/Chunk  │  │
-│  │ (Panache)   │  │ (Panache)   │  │ (Panache)          │  │
-│  └─────────────┘  └─────────────┘  └────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│                     PostgreSQL                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────────────┐  │
-│  │ kv_buckets  │  │ kv_entries  │  │ obj_* tables       │  │
-│  └─────────────┘  └─────────────┘  └────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+![Architektur Diagramm](docs/images/architecture.png)
+
+### Komponenten-Übersicht
+
+```mermaid
+graph TD
+    subgraph "Client Layer"
+        C1[REST Client]
+        C2[WebSocket Client]
+    end
+
+    subgraph "API Layer (Quarkus & Resteasy Reactive)"
+        R1[KV Resources]
+        R2[Object Resources]
+        W1[WebSocket Endpoints]
+    end
+
+    subgraph "Service Layer (Mutiny & Vert.x)"
+        S1[KV Service]
+        S2[Object Store Service]
+        S3[Watch Service]
+    end
+
+    subgraph "Persistence Layer (Hibernate Reactive)"
+        E1[KvBucket/KvEntry]
+        E2[ObjMetadata/ObjChunk]
+    end
+
+    subgraph "Database Layer"
+        DB[(PostgreSQL)]
+    end
+
+    C1 --> R1
+    C1 --> R2
+    C2 --> W1
+    
+    R1 --> S1
+    R2 --> S2
+    W1 --> S3
+    
+    S1 --> E1
+    S2 --> E2
+    
+    E1 --> DB
+    E2 --> DB
+    
+    classDef primary fill:#2196f3,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef secondary fill:#673ab7,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef storage fill:#ff9800,stroke:#fff,stroke-width:2px,color:#fff;
+    
+    class R1,R2,W1 primary;
+    class S1,S2,S3 secondary;
+    class DB storage;
 ```
 
 ## Lizenz
