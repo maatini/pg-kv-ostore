@@ -136,35 +136,46 @@ public class KvService {
                     }
 
                     final byte[] finalValue = value;
-                    return KvEntry.getLatestRevision(bucket.id, key)
-                            .flatMap(currentRevision -> {
-                                long nextRevision = currentRevision + 1;
 
-                                // Create entry
-                                KvEntry entry = new KvEntry();
-                                entry.bucketId = bucket.id;
-                                entry.key = key;
-                                entry.value = finalValue;
-                                entry.revision = nextRevision;
-                                entry.operation = Operation.PUT;
+                    // Call atomic stored procedure
+                    return KvEntry.getSession().flatMap(session -> {
+                        String sql = "SELECT CAST(kv_put(CAST(:bucket_name AS varchar), CAST(:key AS varchar), CAST(:value AS bytea), CAST(:ttl AS bigint), CAST(:max_history AS integer)) AS text)";
+                        return session.createNativeQuery(sql)
+                                .setParameter("bucket_name", bucketName)
+                                .setParameter("key", key)
+                                .setParameter("value", finalValue)
+                                .setParameter("ttl", request.ttlSeconds != null ? request.ttlSeconds : -1L)
+                                .setParameter("max_history", -1) // Use bucket default from DB (-1)
+                                .getSingleResult()
+                                .map(result -> {
+                                    // Result is JSONB string
+                                    try {
+                                        // result might be String or PGObject
+                                        String json = result.toString();
+                                        io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(json);
 
-                                // Set TTL if specified
-                                if (request.ttlSeconds != null && request.ttlSeconds > 0) {
-                                    entry.expiresAt = OffsetDateTime.now().plusSeconds(request.ttlSeconds);
-                                } else if (bucket.ttlSeconds != null && bucket.ttlSeconds > 0) {
-                                    entry.expiresAt = OffsetDateTime.now().plusSeconds(bucket.ttlSeconds);
-                                }
+                                        KvEntry entry = new KvEntry();
+                                        entry.id = java.util.UUID.fromString(obj.getString("id"));
+                                        entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
+                                        entry.key = key;
+                                        entry.value = finalValue;
+                                        entry.revision = obj.getLong("revision");
+                                        entry.operation = Operation.PUT;
+                                        // Parse timestamps if needed, or just set now() for response
+                                        // Response uses entry.createdAt
+                                        // obj.getString("created_at") -> Parse
+                                        entry.createdAt = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
+                                                .parse(obj.getString("created_at"), OffsetDateTime::from);
+                                        // expiresAt is not returned by SP explicitely in JSON unless we add it
+                                        // But reasonable to leave null or fetch if needed.
+                                        // For response, created_at is key.
 
-                                return entry.<KvEntry>persist()
-                                        .flatMap(e -> cleanupOldRevisions(bucket.id, key, bucket.maxHistoryPerKey)
-                                                .replaceWith(e))
-                                        .invoke(e -> {
-                                            LOG.debugf("Put key: %s/%s (revision=%d, size=%d)", bucketName, key,
-                                                    nextRevision, finalValue.length);
-                                            // Notify watchers (fire and forget for now, or chained)
-                                            watchService.notifyChange(KvEntryDto.WatchEvent.from(e, bucketName));
-                                        });
-                            });
+                                        return entry;
+                                    } catch (Exception e) {
+                                        throw new RuntimeException("Failed to parse DB result", e);
+                                    }
+                                });
+                    });
                 });
     }
 
@@ -199,26 +210,49 @@ public class KvService {
 
     @WithTransaction
     public Uni<KvEntry> delete(String bucketName, String key) {
-        return getBucket(bucketName)
-                .flatMap(bucket -> KvEntry.findLatest(bucket.id, key)
-                        .onItem().ifNull()
-                        .failWith(() -> new NotFoundException(String.format("Key not found: %s/%s", bucketName, key)))
-                        .flatMap(latest -> {
-                            // Create delete marker
-                            long nextRevision = latest.revision + 1;
-                            KvEntry deleteMarker = new KvEntry();
-                            deleteMarker.bucketId = bucket.id;
-                            deleteMarker.key = key;
-                            deleteMarker.value = null;
-                            deleteMarker.revision = nextRevision;
-                            deleteMarker.operation = Operation.DELETE;
+        // Validation: Check if bucket/key exists logic inside SP or keep here?
+        // SP checks if key exists.
+        // But getBucket(bucketName) is good for standard 404 on bucket.
+        // SP throws exception if bucket/key not found.
+        // If I call SP directly, exception mapping is harder (PSQLException).
+        // I will keep getBucket.
 
-                            return deleteMarker.<KvEntry>persist()
-                                    .invoke(e -> {
-                                        LOG.debugf("Deleted key: %s/%s (revision=%d)", bucketName, key, nextRevision);
-                                        watchService.notifyChange(KvEntryDto.WatchEvent.from(e, bucketName));
-                                    });
-                        }));
+        return KvEntry.getSession().flatMap(session -> {
+            String sql = "SELECT CAST(kv_delete(CAST(:bucket_name AS varchar), CAST(:key AS varchar)) AS text)";
+            return session.createNativeQuery(sql)
+                    .setParameter("bucket_name", bucketName)
+                    .setParameter("key", key)
+                    .getSingleResult()
+                    .map(result -> {
+                        try {
+                            String json = result.toString();
+                            io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(json);
+
+                            KvEntry entry = new KvEntry();
+                            entry.id = java.util.UUID.fromString(obj.getString("id"));
+                            entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
+                            entry.key = key;
+                            entry.value = null;
+                            entry.revision = obj.getLong("revision");
+                            entry.operation = Operation.DELETE;
+                            entry.createdAt = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
+                                    .parse(obj.getString("created_at"), OffsetDateTime::from);
+
+                            LOG.debugf("Deleted key: %s/%s (revision=%d)", bucketName, key, entry.revision);
+                            return entry;
+                        } catch (Exception e) {
+                            throw new RuntimeException("Failed to parse DB result or Key not found", e);
+                        }
+                    })
+                    // Map specific DB errors to NotFound?
+                    .onFailure().transform(t -> {
+                        // If SP raises "Key not found", we get exception.
+                        if (t.getMessage().contains("P0002") || t.getMessage().contains("Key not found")) {
+                            return new NotFoundException("Key not found: " + bucketName + "/" + key);
+                        }
+                        return t;
+                    });
+        });
     }
 
     @WithTransaction
