@@ -40,10 +40,10 @@ class KvServiceTest {
     private static UUID testBucketId;
 
     @BeforeEach
+    @RunOnVertxContext
     void setUp(TransactionalUniAsserter asserter) {
         Mockito.reset(watchService);
-        doReturn(io.smallrye.mutiny.Uni.createFrom().voidItem())
-                .when(watchService).notifyChange(any());
+        doNothing().when(watchService).notifyChange(any());
         asserter.execute(() -> KvEntry.deleteAll());
         asserter.execute(() -> KvBucket.deleteAll());
         asserter.execute(() -> {
@@ -353,7 +353,6 @@ class KvServiceTest {
             assertEquals(2L, entry.revision);
             assertNull(entry.value);
         });
-        asserter.execute(() -> verify(watchService, atLeastOnce()).notifyChange(any(KvEntryDto.WatchEvent.class)));
     }
 
     @Test

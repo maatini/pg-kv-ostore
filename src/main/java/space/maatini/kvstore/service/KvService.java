@@ -166,9 +166,12 @@ public class KvService {
                                         // obj.getString("created_at") -> Parse
                                         entry.createdAt = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
                                                 .parse(obj.getString("created_at"), OffsetDateTime::from);
-                                        // expiresAt is not returned by SP explicitely in JSON unless we add it
-                                        // But reasonable to leave null or fetch if needed.
-                                        // For response, created_at is key.
+
+                                        String expiresAtStr = obj.getString("expires_at");
+                                        if (expiresAtStr != null) {
+                                            entry.expiresAt = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
+                                                    .parse(expiresAtStr, OffsetDateTime::from);
+                                        }
 
                                         return entry;
                                     } catch (Exception e) {
