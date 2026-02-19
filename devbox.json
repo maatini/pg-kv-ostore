@@ -9,11 +9,19 @@
         "jq",
         "curl"
     ],
+    "env": {
+        "DOCKER_API_VERSION": "1.44",
+        "DOCKER_HOST": "unix:///Users/martinrichardt/.docker/run/docker.sock",
+        "TESTCONTAINERS_RYUK_DISABLED": "true"
+    },
     "shell": {
         "init_hook": [
-            "echo 'Welcome to the kv-ostore-psql development environment!'",
-            "echo 'JDK Version: $(java -version 2>&1 | head -n 1)'",
-            "echo 'Maven Version: $(mvn -version | head -n 1)'"
+            "echo \"Welcome to the kv-ostore-psql development environment!\"",
+            "echo \"JDK Version: $(java -version 2>&1 | head -n 1)\"",
+            "echo \"Maven Version: $(mvn -version | head -n 1)\"",
+            "export DOCKER_API_VERSION=1.44",
+            "export DOCKER_HOST=unix:///Users/martinrichardt/.docker/run/docker.sock",
+            "export TESTCONTAINERS_RYUK_DISABLED=true"
         ],
         "scripts": {
             "test": "mvn test",
