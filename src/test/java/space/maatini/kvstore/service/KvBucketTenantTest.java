@@ -4,7 +4,6 @@ package space.maatini.kvstore.service;
 import space.maatini.common.exception.ConflictException;
 import space.maatini.common.util.TenantContext;
 import space.maatini.kvstore.dto.KvBucketDto;
-import space.maatini.kvstore.entity.KvBucket;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.vertx.RunOnVertxContext;
 import io.quarkus.test.hibernate.reactive.panache.TransactionalUniAsserter;

@@ -1,0 +1,26 @@
+{
+    "$schema": "https://raw.githubusercontent.com/jetpack-io/devbox/main/.schema/devbox.schema.json",
+    "packages": [
+        "jdk@21",
+        "maven",
+        "docker-compose",
+        "postgresql_16",
+        "awscli2",
+        "jq",
+        "curl"
+    ],
+    "shell": {
+        "init_hook": [
+            "echo 'Welcome to the kv-ostore-psql development environment!'",
+            "echo 'JDK Version: $(java -version 2>&1 | head -n 1)'",
+            "echo 'Maven Version: $(mvn -version | head -n 1)'"
+        ],
+        "scripts": {
+            "test": "mvn test",
+            "dev": "mvn quarkus:dev",
+            "build": "mvn package",
+            "db:up": "docker-compose up -d postgres",
+            "db:down": "docker-compose stop postgres"
+        }
+    }
+}

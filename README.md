@@ -79,10 +79,20 @@ Dieser Microservice ist für Szenarien konzipiert, in denen operative Einfachhei
 - Maven 3.9+
 - Docker und Docker Compose (für containerisiertes Setup)
 - PostgreSQL 14+ (oder Docker verwenden)
+- **Devbox** (Optional, für ein isoliertes Setup aller Abhängigkeiten)
 
 ## Schnellstart
 
-### Option 1: Docker Compose (Empfohlen)
+### Option 1: Devbox (Schnellster lokaler Start)
+Wenn Sie [devbox](https://www.jetpack.io/devbox) installiert haben, können Sie die gesamte Entwicklungsumgebung (JDK, Maven, Postgres-Tools) mit einem Befehl starten:
+
+```bash
+devbox shell
+# Danach im Shell:
+mvn quarkus:dev
+```
+
+### Option 2: Docker Compose (Für Container-Betrieb)
 
 ```bash
 # Starten von PostgreSQL und dem Service
@@ -202,7 +212,7 @@ curl http://localhost:8080/api/v1/objects/buckets/my-files/objects/dokument.pdf/
 
 ## Multi-Mandantenfähigkeit (Multi-Tenancy)
 
-Der Service unterstützt vollständige Datenisolierung zwischen Mandanten durch Row Level Security (RLS) auf Datenbankebene.
+Der Service unterstützt vollständige Datenisolierung zwischen Mandanten durch **Row Level Security (RLS)** auf Datenbankebene. Die Implementierung ist robust und erzwingt Isolation auch für den Datenbank-Superuser (`FORCE RLS`).
 
 Um auf einen spezifischen Mandantenbereich zuzugreifen, senden Sie einfach den `X-Tenant-ID` Header mit jeder Anfrage:
 
@@ -242,7 +252,7 @@ Die Konfiguration erfolgt über `application.properties` oder Umgebungsvariablen
 
 ## Testen
 
-Der Service verfügt über eine umfassende Testsuite mit **166 automatisierten Tests**, die sowohl Unit- als auch Integrationstests abdecken.
+Der Service verfügt über eine umfassende Testsuite mit **181 automatisierten Tests**, die sowohl Unit- als auch Integrationstests abdecken.
 
 ```bash
 # Unit- und Integrationstests ausführen
