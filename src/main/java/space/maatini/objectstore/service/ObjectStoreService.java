@@ -2,25 +2,23 @@ package space.maatini.objectstore.service;
 
 import space.maatini.common.exception.ConflictException;
 import space.maatini.common.exception.NotFoundException;
-import space.maatini.common.exception.ValidationException;
 import space.maatini.objectstore.dto.ObjBucketDto;
 import space.maatini.objectstore.dto.ObjMetadataDto;
 import space.maatini.objectstore.entity.ObjBucket;
 import space.maatini.objectstore.entity.ObjChunk;
 import space.maatini.objectstore.entity.ObjMetadata;
+import space.maatini.objectstore.repository.ObjectStorageRepository;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Any;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import io.quarkus.hibernate.reactive.panache.common.WithSession;
 import io.quarkus.hibernate.reactive.panache.common.WithTransaction;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -43,6 +41,13 @@ public class ObjectStoreService {
     @ConfigProperty(name = "objectstore.hash-algorithm", defaultValue = "SHA-256")
     String hashAlgorithm;
 
+    @ConfigProperty(name = "objectstore.backend", defaultValue = "postgres")
+    String storageBackend;
+
+    @Inject
+    @Any
+    Instance<ObjectStorageRepository> storageRepositories;
+
     @Inject
     ObjectWatchService watchService;
 
@@ -51,6 +56,10 @@ public class ObjectStoreService {
 
     @Inject
     space.maatini.common.util.TenantContext tenantContext;
+
+    private ObjectStorageRepository getRepository() {
+        return storageRepositories.select(jakarta.enterprise.inject.literal.NamedLiteral.of(storageBackend)).get();
+    }
 
     // ==================== Bucket Operations ====================
 
@@ -111,7 +120,7 @@ public class ObjectStoreService {
                             if (objects.isEmpty())
                                 return Uni.createFrom().item(objects);
                             return Uni.combine().all().unis(
-                                    objects.stream().map(obj -> ObjChunk.deleteByMetadata(obj.id)
+                                    objects.stream().map(obj -> getRepository().delete(name, obj)
                                             .flatMap(d -> obj.delete())).collect(Collectors.toList()))
                                     .discardItems().replaceWith(objects);
                         })
@@ -139,7 +148,7 @@ public class ObjectStoreService {
                     return ObjMetadata.findByBucketAndName(bucket.id, objectName)
                             .flatMap(existing -> {
                                 if (existing != null) {
-                                    return ObjChunk.deleteByMetadata(existing.id)
+                                    return getRepository().delete(bucketName, existing)
                                             .flatMap(d -> existing.delete())
                                             .replaceWithVoid();
                                 }
@@ -149,11 +158,6 @@ public class ObjectStoreService {
                 })
                 .flatMap(bucket -> dbUtils.setupTenant().replaceWith(bucket))
                 .flatMap(bucket -> {
-                    // This is a simplified reactive chunking.
-                    // In a real scenario, we might want to use a stateful transformation or
-                    // collect.
-                    // For now, let's accumulate into chunks.
-
                     ObjMetadata metadata = new ObjMetadata();
                     metadata.bucketId = bucket.id;
                     metadata.name = objectName;
@@ -167,10 +171,8 @@ public class ObjectStoreService {
 
                     return metadata.<ObjMetadata>persist()
                             .flatMap(m -> {
-                                // Process stream and store chunks
-                                // Note: This is a complex reactive pipe.
-                                // We'll use a local state to track chunks.
-                                return processDataStream(m, dataStream, bucket.chunkSize, bucket.maxObjectSize)
+                                return getRepository()
+                                        .save(bucketName, m, dataStream, bucket.chunkSize, bucket.maxObjectSize)
                                         .flatMap(finalMetadata -> finalMetadata.<ObjMetadata>persist())
                                         .invoke(fm -> LOG.infof("Stored object: %s/%s (size=%d, chunks=%d, digest=%s)",
                                                 bucketName, objectName, fm.size, fm.chunkCount, fm.digest))
@@ -178,89 +180,6 @@ public class ObjectStoreService {
                                                 .notifyChange(ObjMetadataDto.WatchEvent.fromPut(fm, bucketName)));
                             });
                 });
-    }
-
-    private Uni<ObjMetadata> processDataStream(ObjMetadata metadata, Multi<byte[]> dataStream, int chunkSize,
-            long maxSize) {
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance(hashAlgorithm);
-        } catch (NoSuchAlgorithmException e) {
-            return Uni.createFrom().failure(e);
-        }
-
-        // State holder for chunking
-        class State {
-            long totalSize = 0;
-            int chunkIndex = 0;
-            byte[] leftover = new byte[0];
-        }
-        State state = new State();
-
-        return dataStream.onItem().transformToUniAndConcatenate(data -> {
-            state.totalSize += data.length;
-            if (state.totalSize > maxSize) {
-                return Uni.createFrom().failure(new ValidationException("Object size exceeds maximum"));
-            }
-            digest.update(data);
-
-            // Concatenate with leftover
-            byte[] combined;
-            if (state.leftover.length > 0) {
-                combined = new byte[state.leftover.length + data.length];
-                System.arraycopy(state.leftover, 0, combined, 0, state.leftover.length);
-                System.arraycopy(data, 0, combined, state.leftover.length, data.length);
-            } else {
-                combined = data;
-            }
-
-            int offset = 0;
-            List<Uni<Void>> chunkOps = new java.util.ArrayList<>();
-            while (combined.length - offset >= chunkSize) {
-                byte[] chunkData = new byte[chunkSize];
-                System.arraycopy(combined, offset, chunkData, 0, chunkSize);
-                chunkOps.add(storeChunk(metadata, state.chunkIndex++, chunkData));
-                offset += chunkSize;
-            }
-
-            state.leftover = new byte[combined.length - offset];
-            System.arraycopy(combined, offset, state.leftover, 0, state.leftover.length);
-
-            if (chunkOps.isEmpty())
-                return Uni.createFrom().voidItem();
-            return Uni.combine().all().unis(chunkOps).discardItems();
-        }).collect().last()
-                .flatMap(v -> {
-                    // Store final leftover
-                    if (state.leftover.length > 0) {
-                        return storeChunk(metadata, state.chunkIndex++, state.leftover);
-                    }
-                    return Uni.createFrom().voidItem();
-                })
-                .map(v -> {
-                    metadata.size = state.totalSize;
-                    metadata.chunkCount = state.chunkIndex;
-                    metadata.digest = HexFormat.of().formatHex(digest.digest());
-                    return metadata;
-                });
-    }
-
-    private Uni<Void> storeChunk(ObjMetadata metadata, int index, byte[] data) {
-        ObjChunk chunk = new ObjChunk();
-        chunk.metadataId = metadata.id;
-        chunk.chunkIndex = index;
-        chunk.data = data;
-        chunk.size = data.length;
-
-        // Calculate chunk digest
-        try {
-            MessageDigest md = MessageDigest.getInstance(hashAlgorithm);
-            chunk.digest = HexFormat.of().formatHex(md.digest(data));
-        } catch (NoSuchAlgorithmException e) {
-            LOG.warn("Could not calculate chunk digest", e);
-        }
-
-        return chunk.<ObjChunk>persist().replaceWithVoid();
     }
 
     public Uni<ObjMetadata> getMetadata(String bucketName, String objectName) {
@@ -277,6 +196,8 @@ public class ObjectStoreService {
 
     /**
      * Get a streaming Multi of object chunks.
+     * Note: This primarily works for Postgres backend which uses chunking.
+     * For stream-based backends, this might return empty if chunks are not stored.
      */
     public Multi<ObjChunk> getObjectChunks(String bucketName, String objectName) {
         return getMetadata(bucketName, objectName)
@@ -290,42 +211,7 @@ public class ObjectStoreService {
      */
     public Uni<byte[]> getObjectRange(String bucketName, String objectName, long offset, long length) {
         return getMetadata(bucketName, objectName)
-                .flatMap(metadata -> {
-                    if (offset < 0 || length < 0 || offset >= metadata.size) {
-                        throw new ValidationException("Invalid range: offset=" + offset + ", length=" + length);
-                    }
-
-                    long actualLength = Math.min(length, metadata.size - offset);
-                    if (actualLength == 0) {
-                        return Uni.createFrom().item(new byte[0]);
-                    }
-
-                    return getBucket(bucketName).flatMap(bucket -> {
-                        int startChunk = (int) (offset / bucket.chunkSize);
-                        int endChunk = (int) ((offset + actualLength - 1) / bucket.chunkSize);
-
-                        return ObjChunk.findOrderedByMetadataAndRange(metadata.id, startChunk, endChunk)
-                                .map(chunks -> {
-                                    ByteArrayOutputStream output = new ByteArrayOutputStream((int) actualLength);
-                                    long currentPos = (long) startChunk * bucket.chunkSize;
-
-                                    for (ObjChunk chunk : chunks) {
-                                        long chunkEnd = currentPos + chunk.size;
-
-                                        long sliceStart = Math.max(offset, currentPos);
-                                        long sliceEnd = Math.min(offset + actualLength, chunkEnd);
-
-                                        if (sliceStart < sliceEnd) {
-                                            int startOffsetInChunk = (int) (sliceStart - currentPos);
-                                            int lengthInChunk = (int) (sliceEnd - sliceStart);
-                                            output.write(chunk.data, startOffsetInChunk, lengthInChunk);
-                                        }
-                                        currentPos = chunkEnd;
-                                    }
-                                    return output.toByteArray();
-                                });
-                    });
-                });
+                .flatMap(metadata -> getRepository().readRange(bucketName, metadata, offset, length));
     }
 
     /**
@@ -340,8 +226,8 @@ public class ObjectStoreService {
     public Uni<Void> deleteObject(String bucketName, String objectName) {
         return dbUtils.setupTenant()
                 .flatMap(v -> getMetadata(bucketName, objectName))
-                .flatMap(metadata -> ObjChunk.deleteByMetadata(metadata.id)
-                        .flatMap(deletedChunks -> metadata.delete())
+                .flatMap(metadata -> getRepository().delete(bucketName, metadata)
+                        .flatMap(v -> metadata.delete())
                         .invoke(() -> LOG.infof("Deleted object: %s/%s", bucketName, objectName))
                         .invoke(() -> watchService
                                 .notifyChange(ObjMetadataDto.WatchEvent.fromDelete(bucketName, objectName))))
@@ -353,26 +239,6 @@ public class ObjectStoreService {
      */
     public Uni<Boolean> verifyIntegrity(String bucketName, String objectName) {
         return getMetadata(bucketName, objectName)
-                .flatMap(metadata -> ObjChunk.findByMetadataOrdered(metadata.id)
-                        .map(chunks -> {
-                            try {
-                                MessageDigest digest = MessageDigest.getInstance(metadata.digestAlgorithm);
-                                for (ObjChunk chunk : chunks) {
-                                    digest.update(chunk.data);
-                                }
-                                String computed = HexFormat.of().formatHex(digest.digest());
-                                boolean valid = computed.equals(metadata.digest);
-
-                                if (!valid) {
-                                    LOG.warnf("Integrity check failed for %s/%s: expected=%s, computed=%s",
-                                            bucketName, objectName, metadata.digest, computed);
-                                }
-
-                                return valid;
-                            } catch (NoSuchAlgorithmException e) {
-                                throw new RuntimeException("Hash algorithm not available: " + metadata.digestAlgorithm,
-                                        e);
-                            }
-                        }));
+                .flatMap(metadata -> getRepository().verifyIntegrity(bucketName, metadata));
     }
 }
