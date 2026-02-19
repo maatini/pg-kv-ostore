@@ -39,6 +39,12 @@ public class KvService {
     @Inject
     KvWatchService watchService;
 
+    @Inject
+    space.maatini.common.util.DatabaseUtils dbUtils;
+
+    @Inject
+    space.maatini.common.util.TenantContext tenantContext;
+
     // ==================== Bucket Operations ====================
 
     @WithTransaction
@@ -114,70 +120,133 @@ public class KvService {
     public Uni<KvEntry> put(String bucketName, String key, KvEntryDto.PutRequest request) {
         return getBucket(bucketName)
                 .flatMap(bucket -> {
-                    // Decode value
                     byte[] value;
                     if (request.base64) {
                         try {
                             value = Base64.getDecoder().decode(request.value);
                         } catch (IllegalArgumentException e) {
-                            return Uni.createFrom().failure(
-                                    new ValidationException("Invalid base64 value"));
+                            return Uni.createFrom().failure(new ValidationException("Invalid base64 value"));
                         }
                     } else {
                         value = request.value != null ? request.value.getBytes() : new byte[0];
                     }
 
-                    // Validate size
                     if (value.length > bucket.maxValueSize) {
                         return Uni.createFrom()
-                                .failure(new ValidationException(String.format(
-                                        "Value size (%d bytes) exceeds maximum (%d bytes)",
-                                        value.length, bucket.maxValueSize)));
+                                .failure(new ValidationException(
+                                        String.format("Value size (%d bytes) exceeds maximum (%d bytes)", value.length,
+                                                bucket.maxValueSize)));
                     }
 
                     final byte[] finalValue = value;
 
-                    // Call atomic stored procedure
-                    return KvEntry.getSession().flatMap(session -> {
-                        String sql = "SELECT CAST(kv_put(CAST(:bucket_name AS varchar), CAST(:key AS varchar), CAST(:value AS bytea), CAST(:ttl AS bigint), CAST(:max_history AS integer)) AS text)";
-                        return session.createNativeQuery(sql)
-                                .setParameter("bucket_name", bucketName)
-                                .setParameter("key", key)
-                                .setParameter("value", finalValue)
-                                .setParameter("ttl", request.ttlSeconds != null ? request.ttlSeconds : -1L)
-                                .setParameter("max_history", -1) // Use bucket default from DB (-1)
-                                .getSingleResult()
-                                .map(result -> {
-                                    // Result is JSONB string
-                                    try {
-                                        // result might be String or PGObject
-                                        String json = result.toString();
-                                        io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(json);
-
-                                        KvEntry entry = new KvEntry();
-                                        entry.id = java.util.UUID.fromString(obj.getString("id"));
-                                        entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
-                                        entry.key = key;
-                                        entry.value = finalValue;
-                                        entry.revision = obj.getLong("revision");
-                                        entry.operation = Operation.PUT;
-                                        // Parse timestamps if needed, or just set now() for response
-                                        // Response uses entry.createdAt
-                                        // obj.getString("created_at") -> Parse
-                                        entry.createdAt = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
-                                                .parse(obj.getString("created_at"), OffsetDateTime::from);
-
-                                        String expiresAtStr = obj.getString("expires_at");
-                                        if (expiresAtStr != null) {
-                                            entry.expiresAt = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
-                                                    .parse(expiresAtStr, OffsetDateTime::from);
+                    return dbUtils.setupTenant().flatMap(v -> {
+                        return KvEntry.getSession().flatMap(session -> {
+                            String sql = "SELECT CAST(kv_put(CAST(:bucket_name AS varchar), CAST(:key AS text), CAST(:value AS bytea), CAST(:ttl AS bigint), CAST(:max_history AS integer)) AS text)";
+                            return session.createNativeQuery(sql, String.class)
+                                    .setParameter("bucket_name", bucketName)
+                                    .setParameter("key", key)
+                                    .setParameter("value", finalValue)
+                                    .setParameter("ttl", request.ttlSeconds != null ? request.ttlSeconds : -1L)
+                                    .setParameter("max_history", -1)
+                                    .getSingleResult()
+                                    .map(result -> {
+                                        try {
+                                            io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(
+                                                    result);
+                                            KvEntry entry = new KvEntry();
+                                            entry.id = java.util.UUID.fromString(obj.getString("id"));
+                                            entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
+                                            entry.key = key;
+                                            entry.value = finalValue;
+                                            entry.revision = obj.getLong("revision");
+                                            entry.operation = Operation.PUT;
+                                            entry.tenantId = tenantContext.getTenantId();
+                                            entry.createdAt = OffsetDateTime.parse(obj.getString("created_at"));
+                                            String expiresAtStr = obj.getString("expires_at");
+                                            if (expiresAtStr != null) {
+                                                entry.expiresAt = OffsetDateTime.parse(expiresAtStr);
+                                            }
+                                            return entry;
+                                        } catch (Exception e) {
+                                            throw new RuntimeException("Failed to parse DB result", e);
                                         }
+                                    });
+                        });
+                    });
+                });
+    }
 
-                                        return entry;
-                                    } catch (Exception e) {
-                                        throw new RuntimeException("Failed to parse DB result", e);
-                                    }
-                                });
+    @WithTransaction
+    public Uni<KvEntry> cas(String bucketName, String key, KvEntryDto.PutRequest request, long expectedRevision) {
+        return getBucket(bucketName)
+                .flatMap(bucket -> {
+                    byte[] value;
+                    if (request.base64) {
+                        try {
+                            value = Base64.getDecoder().decode(request.value);
+                        } catch (IllegalArgumentException e) {
+                            return Uni.createFrom()
+                                    .failure(new ValidationException("Invalid base64 value: " + e.getMessage()));
+                        }
+                    } else {
+                        value = request.value != null ? request.value.getBytes() : new byte[0];
+                    }
+
+                    if (value == null) {
+                        return Uni.createFrom().failure(new ValidationException("Value cannot be null for CAS"));
+                    }
+
+                    if (value.length > bucket.maxValueSize) {
+                        return Uni.createFrom()
+                                .failure(new ValidationException(
+                                        String.format("Value size (%d bytes) exceeds maximum (%d bytes)", value.length,
+                                                bucket.maxValueSize)));
+                    }
+
+                    final byte[] finalValue = value;
+
+                    return dbUtils.setupTenant().flatMap(v -> {
+                        return KvEntry.getSession().flatMap(session -> {
+                            String sql = "SELECT CAST(kv_cas(CAST(:bucket_name AS varchar), CAST(:key AS text), CAST(:value AS bytea), CAST(:expected_rev AS bigint), CAST(:ttl AS bigint), CAST(:max_history AS integer)) AS text)";
+                            return session.createNativeQuery(sql, String.class)
+                                    .setParameter("bucket_name", bucketName)
+                                    .setParameter("key", key)
+                                    .setParameter("value", finalValue)
+                                    .setParameter("expected_rev", expectedRevision)
+                                    .setParameter("ttl", request.ttlSeconds != null ? request.ttlSeconds : -1L)
+                                    .setParameter("max_history", -1)
+                                    .getSingleResult()
+                                    .map(result -> {
+                                        try {
+                                            io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(
+                                                    result);
+                                            KvEntry entry = new KvEntry();
+                                            entry.id = java.util.UUID.fromString(obj.getString("id"));
+                                            entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
+                                            entry.key = key;
+                                            entry.value = finalValue;
+                                            entry.revision = obj.getLong("revision");
+                                            entry.operation = Operation.PUT;
+                                            entry.tenantId = tenantContext.getTenantId();
+                                            entry.createdAt = OffsetDateTime.parse(obj.getString("created_at"));
+                                            String expiresAtStr = obj.getString("expires_at");
+                                            if (expiresAtStr != null) {
+                                                entry.expiresAt = OffsetDateTime.parse(expiresAtStr);
+                                            }
+                                            return entry;
+                                        } catch (Exception e) {
+                                            throw new RuntimeException("Failed to parse DB result", e);
+                                        }
+                                    })
+                                    .onFailure().transform(t -> {
+                                        if (t.getMessage().contains("P0003")
+                                                || t.getMessage().contains("CAS Failure")) {
+                                            return new ConflictException(t.getMessage());
+                                        }
+                                        return t;
+                                    });
+                        });
                     });
                 });
     }
@@ -213,48 +282,38 @@ public class KvService {
 
     @WithTransaction
     public Uni<KvEntry> delete(String bucketName, String key) {
-        // Validation: Check if bucket/key exists logic inside SP or keep here?
-        // SP checks if key exists.
-        // But getBucket(bucketName) is good for standard 404 on bucket.
-        // SP throws exception if bucket/key not found.
-        // If I call SP directly, exception mapping is harder (PSQLException).
-        // I will keep getBucket.
-
-        return KvEntry.getSession().flatMap(session -> {
-            String sql = "SELECT CAST(kv_delete(CAST(:bucket_name AS varchar), CAST(:key AS varchar)) AS text)";
-            return session.createNativeQuery(sql)
-                    .setParameter("bucket_name", bucketName)
-                    .setParameter("key", key)
-                    .getSingleResult()
-                    .map(result -> {
-                        try {
-                            String json = result.toString();
-                            io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(json);
-
-                            KvEntry entry = new KvEntry();
-                            entry.id = java.util.UUID.fromString(obj.getString("id"));
-                            entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
-                            entry.key = key;
-                            entry.value = null;
-                            entry.revision = obj.getLong("revision");
-                            entry.operation = Operation.DELETE;
-                            entry.createdAt = java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
-                                    .parse(obj.getString("created_at"), OffsetDateTime::from);
-
-                            LOG.debugf("Deleted key: %s/%s (revision=%d)", bucketName, key, entry.revision);
-                            return entry;
-                        } catch (Exception e) {
-                            throw new RuntimeException("Failed to parse DB result or Key not found", e);
-                        }
-                    })
-                    // Map specific DB errors to NotFound?
-                    .onFailure().transform(t -> {
-                        // If SP raises "Key not found", we get exception.
-                        if (t.getMessage().contains("P0002") || t.getMessage().contains("Key not found")) {
-                            return new NotFoundException("Key not found: " + bucketName + "/" + key);
-                        }
-                        return t;
-                    });
+        return dbUtils.setupTenant().flatMap(v -> {
+            return KvEntry.getSession().flatMap(session -> {
+                String sql = "SELECT CAST(kv_delete(CAST(:bucket_name AS varchar), CAST(:key AS text)) AS text)";
+                return session.createNativeQuery(sql)
+                        .setParameter("bucket_name", bucketName)
+                        .setParameter("key", key)
+                        .getSingleResult()
+                        .map(result -> {
+                            try {
+                                io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(
+                                        result.toString());
+                                KvEntry entry = new KvEntry();
+                                entry.id = java.util.UUID.fromString(obj.getString("id"));
+                                entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
+                                entry.key = key;
+                                entry.value = null;
+                                entry.revision = obj.getLong("revision");
+                                entry.operation = Operation.DELETE;
+                                entry.createdAt = OffsetDateTime.parse(obj.getString("created_at"));
+                                LOG.debugf("Deleted key: %s/%s (revision=%d)", bucketName, key, entry.revision);
+                                return entry;
+                            } catch (Exception e) {
+                                throw new RuntimeException("Failed to parse DB result or Key not found", e);
+                            }
+                        })
+                        .onFailure().transform(t -> {
+                            if (t.getMessage().contains("P0002") || t.getMessage().contains("Key not found")) {
+                                return new NotFoundException("Key not found: " + bucketName + "/" + key);
+                            }
+                            return t;
+                        });
+            });
         });
     }
 

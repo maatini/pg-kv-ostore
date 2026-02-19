@@ -18,7 +18,6 @@ import io.quarkus.hibernate.reactive.panache.common.WithTransaction;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -46,6 +45,12 @@ public class ObjectStoreService {
 
     @Inject
     ObjectWatchService watchService;
+
+    @Inject
+    space.maatini.common.util.DatabaseUtils dbUtils;
+
+    @Inject
+    space.maatini.common.util.TenantContext tenantContext;
 
     // ==================== Bucket Operations ====================
 
@@ -142,6 +147,7 @@ public class ObjectStoreService {
                             })
                             .replaceWith(bucket);
                 })
+                .flatMap(bucket -> dbUtils.setupTenant().replaceWith(bucket))
                 .flatMap(bucket -> {
                     // This is a simplified reactive chunking.
                     // In a real scenario, we might want to use a stateful transformation or
@@ -157,6 +163,7 @@ public class ObjectStoreService {
                     metadata.contentType = contentType;
                     metadata.description = description;
                     metadata.headers = headers;
+                    metadata.tenantId = tenantContext.getTenantId();
 
                     return metadata.<ObjMetadata>persist()
                             .flatMap(m -> {
@@ -279,27 +286,60 @@ public class ObjectStoreService {
     }
 
     /**
+     * Get a range of object data.
+     */
+    public Uni<byte[]> getObjectRange(String bucketName, String objectName, long offset, long length) {
+        return getMetadata(bucketName, objectName)
+                .flatMap(metadata -> {
+                    if (offset < 0 || length < 0 || offset >= metadata.size) {
+                        throw new ValidationException("Invalid range: offset=" + offset + ", length=" + length);
+                    }
+
+                    long actualLength = Math.min(length, metadata.size - offset);
+                    if (actualLength == 0) {
+                        return Uni.createFrom().item(new byte[0]);
+                    }
+
+                    return getBucket(bucketName).flatMap(bucket -> {
+                        int startChunk = (int) (offset / bucket.chunkSize);
+                        int endChunk = (int) ((offset + actualLength - 1) / bucket.chunkSize);
+
+                        return ObjChunk.findOrderedByMetadataAndRange(metadata.id, startChunk, endChunk)
+                                .map(chunks -> {
+                                    ByteArrayOutputStream output = new ByteArrayOutputStream((int) actualLength);
+                                    long currentPos = (long) startChunk * bucket.chunkSize;
+
+                                    for (ObjChunk chunk : chunks) {
+                                        long chunkEnd = currentPos + chunk.size;
+
+                                        long sliceStart = Math.max(offset, currentPos);
+                                        long sliceEnd = Math.min(offset + actualLength, chunkEnd);
+
+                                        if (sliceStart < sliceEnd) {
+                                            int startOffsetInChunk = (int) (sliceStart - currentPos);
+                                            int lengthInChunk = (int) (sliceEnd - sliceStart);
+                                            output.write(chunk.data, startOffsetInChunk, lengthInChunk);
+                                        }
+                                        currentPos = chunkEnd;
+                                    }
+                                    return output.toByteArray();
+                                });
+                    });
+                });
+    }
+
+    /**
      * Get the complete object data (for smaller objects).
      */
     public Uni<byte[]> getObjectData(String bucketName, String objectName) {
         return getMetadata(bucketName, objectName)
-                .flatMap(metadata -> ObjChunk.findByMetadataOrdered(metadata.id)
-                        .map(chunks -> {
-                            ByteArrayOutputStream output = new ByteArrayOutputStream((int) (long) metadata.size);
-                            for (ObjChunk chunk : chunks) {
-                                try {
-                                    output.write(chunk.data);
-                                } catch (IOException e) {
-                                    throw new RuntimeException(e);
-                                }
-                            }
-                            return output.toByteArray();
-                        }));
+                .flatMap(metadata -> getObjectRange(bucketName, objectName, 0, metadata.size));
     }
 
     @WithTransaction
     public Uni<Void> deleteObject(String bucketName, String objectName) {
-        return getMetadata(bucketName, objectName)
+        return dbUtils.setupTenant()
+                .flatMap(v -> getMetadata(bucketName, objectName))
                 .flatMap(metadata -> ObjChunk.deleteByMetadata(metadata.id)
                         .flatMap(deletedChunks -> metadata.delete())
                         .invoke(() -> LOG.infof("Deleted object: %s/%s", bucketName, objectName))

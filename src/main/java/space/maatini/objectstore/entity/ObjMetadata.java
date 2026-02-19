@@ -26,6 +26,9 @@ public class ObjMetadata extends PanacheEntityBase {
     @Column(name = "name", nullable = false, length = 1024)
     public String name;
 
+    @Column(name = "tenant_id", length = 255)
+    public String tenantId;
+
     @Column(name = "size", nullable = false)
     public Long size;
 

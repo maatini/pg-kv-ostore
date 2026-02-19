@@ -65,34 +65,83 @@ public class ObjectResource {
         @GET
         @Path("/{name}")
         @Produces(MediaType.APPLICATION_OCTET_STREAM)
-        @Operation(summary = "Download object", description = "Downloads the object data as a stream")
+        @Operation(summary = "Download object", description = "Downloads the object data as a stream. Supports Range requests.")
         @APIResponses({
                         @APIResponse(responseCode = "200", description = "Object data"),
-                        @APIResponse(responseCode = "404", description = "Object not found")
+                        @APIResponse(responseCode = "206", description = "Partial object data"),
+                        @APIResponse(responseCode = "404", description = "Object not found"),
+                        @APIResponse(responseCode = "416", description = "Requested Range Not Satisfiable")
         })
         @PermitAll
         public Uni<Response> downloadObject(
                         @Parameter(description = "Bucket name") @PathParam("bucket") String bucket,
-                        @Parameter(description = "Object name") @PathParam("name") String name) {
+                        @Parameter(description = "Object name") @PathParam("name") String name,
+                        @HeaderParam("Range") String rangeHeader) {
 
                 return objectStoreService.getMetadata(bucket, name)
-                                .flatMap(metadata -> objectStoreService.getObjectData(bucket, name)
-                                                .map(data -> {
-                                                        Response.ResponseBuilder response = Response.ok(data)
-                                                                        .header("Content-Length", metadata.size)
-                                                                        .header("Content-Disposition",
-                                                                                        "attachment; filename=\"" + name
-                                                                                                        + "\"")
-                                                                        .header("X-Object-Digest", metadata.digest)
-                                                                        .header("X-Object-Digest-Algorithm",
-                                                                                        metadata.digestAlgorithm);
+                                .flatMap(metadata -> {
+                                        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+                                                try {
+                                                        String range = rangeHeader.substring(6);
+                                                        String[] parts = range.split("-");
+                                                        long start = Long.parseLong(parts[0]);
+                                                        long end = parts.length > 1 ? Long.parseLong(parts[1])
+                                                                        : metadata.size - 1;
 
-                                                        if (metadata.contentType != null) {
-                                                                response.header("Content-Type", metadata.contentType);
+                                                        if (start > end || start >= metadata.size) {
+                                                                return Uni.createFrom().item(Response.status(416)
+                                                                                .header("Content-Range",
+                                                                                                "bytes */" + metadata.size)
+                                                                                .build());
                                                         }
 
-                                                        return response.build();
-                                                }));
+                                                        long length = end - start + 1;
+                                                        return objectStoreService
+                                                                        .getObjectRange(bucket, name, start, length)
+                                                                        .map(data -> Response.status(
+                                                                                        Response.Status.PARTIAL_CONTENT)
+                                                                                        .entity(data)
+                                                                                        .header("Content-Length",
+                                                                                                        data.length)
+                                                                                        .header("Content-Range",
+                                                                                                        String.format("bytes %d-%d/%d",
+                                                                                                                        start,
+                                                                                                                        end,
+                                                                                                                        metadata.size))
+                                                                                        .header("Content-Disposition",
+                                                                                                        "attachment; filename=\""
+                                                                                                                        + name
+                                                                                                                        + "\"")
+                                                                                        .header("X-Object-Digest",
+                                                                                                        metadata.digest)
+                                                                                        .build());
+                                                } catch (Exception e) {
+                                                        // Fallback to full download or error? Let's be lenient or 400.
+                                                        // Standard says ignore invalid range.
+                                                }
+                                        }
+
+                                        return objectStoreService.getObjectData(bucket, name)
+                                                        .map(data -> {
+                                                                Response.ResponseBuilder response = Response.ok(data)
+                                                                                .header("Content-Length", metadata.size)
+                                                                                .header("Content-Disposition",
+                                                                                                "attachment; filename=\""
+                                                                                                                + name
+                                                                                                                + "\"")
+                                                                                .header("X-Object-Digest",
+                                                                                                metadata.digest)
+                                                                                .header("X-Object-Digest-Algorithm",
+                                                                                                metadata.digestAlgorithm);
+
+                                                                if (metadata.contentType != null) {
+                                                                        response.header("Content-Type",
+                                                                                        metadata.contentType);
+                                                                }
+
+                                                                return response.build();
+                                                        });
+                                });
         }
 
         @PUT

@@ -401,4 +401,53 @@ class ObjectStoreServiceTest {
 
         asserter.execute(() -> objectStoreService.deleteBucket("binary-bucket"));
     }
+    // ==================== Range Request Tests ====================
+
+    @Test
+    @Order(150)
+    @RunOnVertxContext
+    void testGetObjectRange_Success(TransactionalUniAsserter asserter) {
+        String content = "0123456789"; // 10 bytes
+        asserter.execute(() -> objectStoreService.putObject(
+                TEST_BUCKET, "range-test.txt",
+                Multi.createFrom().item(content.getBytes()), "text/plain", null, null));
+
+        // Test first half
+        asserter.assertThat(() -> objectStoreService.getObjectRange(TEST_BUCKET, "range-test.txt", 0, 5), data -> {
+            assertArrayEquals("01234".getBytes(), data);
+        });
+
+        // Test second half
+        asserter.assertThat(() -> objectStoreService.getObjectRange(TEST_BUCKET, "range-test.txt", 5, 5), data -> {
+            assertArrayEquals("56789".getBytes(), data);
+        });
+
+        // Test middle
+        asserter.assertThat(() -> objectStoreService.getObjectRange(TEST_BUCKET, "range-test.txt", 2, 4), data -> {
+            assertArrayEquals("2345".getBytes(), data);
+        });
+
+        // Test beyond end (should clamp)
+        asserter.assertThat(() -> objectStoreService.getObjectRange(TEST_BUCKET, "range-test.txt", 8, 10), data -> {
+            assertArrayEquals("89".getBytes(), data);
+        });
+    }
+
+    @Test
+    @Order(151)
+    @RunOnVertxContext
+    void testGetObjectRange_Invalid(TransactionalUniAsserter asserter) {
+        String content = "test";
+        asserter.execute(() -> objectStoreService.putObject(
+                TEST_BUCKET, "range-invalid.txt",
+                Multi.createFrom().item(content.getBytes()), "text/plain", null, null));
+
+        // Negative offset
+        asserter.assertFailedWith(() -> objectStoreService.getObjectRange(TEST_BUCKET, "range-invalid.txt", -1, 5),
+                ValidationException.class);
+
+        // Offset beyond size
+        asserter.assertFailedWith(() -> objectStoreService.getObjectRange(TEST_BUCKET, "range-invalid.txt", 10, 5),
+                ValidationException.class);
+    }
 }

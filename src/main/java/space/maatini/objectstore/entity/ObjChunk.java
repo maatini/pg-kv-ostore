@@ -48,6 +48,11 @@ public class ObjChunk extends PanacheEntityBase {
         return find("metadataId = ?1 AND chunkIndex = ?2", metadataId, chunkIndex).firstResult();
     }
 
+    public static Uni<List<ObjChunk>> findOrderedByMetadataAndRange(UUID metadataId, int startIndex, int endIndex) {
+        return list("metadataId = ?1 AND chunkIndex >= ?2 AND chunkIndex <= ?3 ORDER BY chunkIndex ASC",
+                metadataId, startIndex, endIndex);
+    }
+
     public static Uni<Long> deleteByMetadata(UUID metadataId) {
         return delete("metadataId", metadataId);
     }

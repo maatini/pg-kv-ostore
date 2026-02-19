@@ -87,17 +87,23 @@ public class KvEntryResource {
 
         @PUT
         @Path("/{key}")
-        @Operation(summary = "Put value", description = "Sets a value for a key (creates new revision)")
+        @Operation(summary = "Put value", description = "Sets a value for a key (creates new revision). Supports CAS if expectedRevision is provided.")
         @APIResponses({
                         @APIResponse(responseCode = "200", description = "Value stored", content = @Content(schema = @Schema(implementation = KvEntryDto.Response.class))),
                         @APIResponse(responseCode = "400", description = "Invalid request"),
-                        @APIResponse(responseCode = "404", description = "Bucket not found")
+                        @APIResponse(responseCode = "404", description = "Bucket not found"),
+                        @APIResponse(responseCode = "409", description = "CAS Conflict")
         })
         @RolesAllowed({ "admin", "kv-write" })
         public Uni<KvEntryDto.Response> put(
                         @Parameter(description = "Bucket name") @PathParam("bucket") String bucket,
                         @Parameter(description = "Key name") @PathParam("key") String key,
+                        @Parameter(description = "Expected revision for CAS (optional)") @QueryParam("expectedRevision") Long expectedRevision,
                         KvEntryDto.PutRequest request) {
+                if (expectedRevision != null) {
+                        return kvService.cas(bucket, key, request, expectedRevision)
+                                        .map(entry -> KvEntryDto.Response.from(entry, bucket));
+                }
                 return kvService.put(bucket, key, request).map(entry -> KvEntryDto.Response.from(entry, bucket));
         }
 

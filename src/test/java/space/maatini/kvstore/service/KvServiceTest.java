@@ -498,4 +498,74 @@ class KvServiceTest {
 
         asserter.execute(() -> kvService.deleteBucket("special-chars-bucket"));
     }
+    // ==================== CAS Tests ====================
+
+    @Test
+    @Order(50)
+    @RunOnVertxContext
+    void testCas_Success(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "initial";
+
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "cas-key", request));
+
+        asserter.assertThat(() -> {
+            KvEntryDto.PutRequest casRequest = new KvEntryDto.PutRequest();
+            casRequest.value = "updated";
+            return kvService.cas(TEST_BUCKET, "cas-key", casRequest, 1L);
+        }, entry -> {
+            assertNotNull(entry);
+            assertEquals(2L, entry.revision);
+            assertArrayEquals("updated".getBytes(), entry.value);
+        });
+    }
+
+    @Test
+    @Order(51)
+    @RunOnVertxContext
+    void testCas_Conflict(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "initial";
+
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "cas-conflict-key", request));
+
+        asserter.assertFailedWith(() -> {
+            KvEntryDto.PutRequest casRequest = new KvEntryDto.PutRequest();
+            casRequest.value = "updated";
+            // Expecting revision 999, but actual is 1
+            return kvService.cas(TEST_BUCKET, "cas-conflict-key", casRequest, 999L);
+        }, ConflictException.class);
+    }
+
+    @Test
+    @Order(52)
+    @RunOnVertxContext
+    void testCas_Create_Success(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest casRequest = new KvEntryDto.PutRequest();
+        casRequest.value = "created";
+
+        // Expected revision 0 implies "must not exist"
+        asserter.assertThat(() -> kvService.cas(TEST_BUCKET, "cas-create-key", casRequest, 0L), entry -> {
+            assertNotNull(entry);
+            assertEquals(1L, entry.revision);
+            assertArrayEquals("created".getBytes(), entry.value);
+        });
+    }
+
+    @Test
+    @Order(53)
+    @RunOnVertxContext
+    void testCas_Create_Conflict(TransactionalUniAsserter asserter) {
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "existing";
+
+        asserter.execute(() -> kvService.put(TEST_BUCKET, "cas-create-conflict-key", request));
+
+        asserter.assertFailedWith(() -> {
+            KvEntryDto.PutRequest casRequest = new KvEntryDto.PutRequest();
+            casRequest.value = "overwrite";
+            // Expected revision 0, but it exists (rev 1)
+            return kvService.cas(TEST_BUCKET, "cas-create-conflict-key", casRequest, 0L);
+        }, ConflictException.class);
+    }
 }

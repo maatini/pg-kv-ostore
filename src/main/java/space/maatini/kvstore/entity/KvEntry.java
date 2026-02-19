@@ -33,6 +33,9 @@ public class KvEntry extends PanacheEntityBase {
     @Column(name = "key", nullable = false, length = 1024)
     public String key;
 
+    @Column(name = "tenant_id", length = 255)
+    public String tenantId;
+
     @Column(name = "value", columnDefinition = "BYTEA")
     public byte[] value;
 
