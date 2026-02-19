@@ -15,6 +15,10 @@ import java.util.UUID;
 @Table(name = "obj_metadata")
 public class ObjMetadata extends PanacheEntityBase {
 
+    public enum Status {
+        UPLOADING, COMPLETED, FAILED
+    }
+
     @Id
     @GeneratedValue(strategy = GenerationType.AUTO)
     @Column(name = "id", updatable = false, nullable = false)
@@ -56,6 +60,10 @@ public class ObjMetadata extends PanacheEntityBase {
 
     @Column(name = "updated_at")
     public OffsetDateTime updatedAt;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false)
+    public Status status = Status.COMPLETED;
 
     @PrePersist
     public void onCreate() {

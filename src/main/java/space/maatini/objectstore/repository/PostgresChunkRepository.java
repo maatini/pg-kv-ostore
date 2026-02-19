@@ -1,18 +1,21 @@
 package space.maatini.objectstore.repository;
 
+import io.quarkus.hibernate.reactive.panache.Panache;
 import io.smallrye.mutiny.Multi;
 import io.smallrye.mutiny.Uni;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 import space.maatini.common.exception.ValidationException;
-import space.maatini.objectstore.entity.ObjChunk;
 import space.maatini.objectstore.entity.ObjMetadata;
+import space.maatini.objectstore.entity.ObjSharedChunk;
+import space.maatini.objectstore.entity.ObjMetadataChunk;
 
 import java.io.ByteArrayOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.ArrayList;
 
 @ApplicationScoped
 @jakarta.inject.Named("postgres")
@@ -61,21 +64,29 @@ public class PostgresChunkRepository implements ObjectStorageRepository {
             }
 
             int offset = 0;
-            List<Uni<Void>> chunkOps = new java.util.ArrayList<>();
+            List<byte[]> chunksToStore = new ArrayList<>();
             while (combined.length - offset >= chunkSize) {
                 byte[] chunkData = new byte[chunkSize];
                 System.arraycopy(combined, offset, chunkData, 0, chunkSize);
-                chunkOps.add(storeChunk(metadata, state.chunkIndex++, chunkData, metadata.digestAlgorithm));
+                chunksToStore.add(chunkData);
                 offset += chunkSize;
             }
 
             state.leftover = new byte[combined.length - offset];
             System.arraycopy(combined, offset, state.leftover, 0, state.leftover.length);
 
-            if (chunkOps.isEmpty())
+            if (chunksToStore.isEmpty()) {
+                LOG.debug("No full chunks in buffer, waiting for more data");
                 return Uni.createFrom().voidItem();
-            return Uni.combine().all().unis(chunkOps).discardItems();
-        }).collect().last()
+            }
+
+            // Sequence chunk storage
+            return Multi.createFrom().iterable(chunksToStore)
+                    .onItem()
+                    .transformToUniAndConcatenate(
+                            chunkData -> storeChunk(metadata, state.chunkIndex++, chunkData, metadata.digestAlgorithm))
+                    .collect().last();
+        }).collect().asList()
                 .flatMap(v -> {
                     // Store final leftover
                     if (state.leftover.length > 0) {
@@ -92,35 +103,43 @@ public class PostgresChunkRepository implements ObjectStorageRepository {
     }
 
     private Uni<Void> storeChunk(ObjMetadata metadata, int index, byte[] data, String algorithm) {
-        ObjChunk chunk = new ObjChunk();
-        chunk.metadataId = metadata.id;
-        chunk.chunkIndex = index;
-        chunk.data = data;
-        chunk.size = data.length;
-
-        // Calculate chunk digest
+        String digest;
         try {
             MessageDigest md = MessageDigest.getInstance(algorithm);
-            chunk.digest = HexFormat.of().formatHex(md.digest(data));
+            digest = HexFormat.of().formatHex(md.digest(data));
         } catch (NoSuchAlgorithmException e) {
-            LOG.warn("Could not calculate chunk digest", e);
+            return Uni.createFrom().failure(e);
         }
 
-        return chunk.<ObjChunk>persist().replaceWithVoid();
+        // Each chunk in its own transaction
+        return Panache.withTransaction(() -> ObjSharedChunk.findByDigest(digest)
+                .flatMap(existing -> {
+                    if (existing == null) {
+                        ObjSharedChunk newShared = new ObjSharedChunk();
+                        newShared.digest = digest;
+                        newShared.data = data;
+                        newShared.size = data.length;
+                        return newShared.persist().replaceWith(digest);
+                    }
+                    return Uni.createFrom().item(digest);
+                })
+                .flatMap(finalDigest -> {
+                    ObjMetadataChunk mapping = new ObjMetadataChunk();
+                    mapping.metadataId = metadata.id;
+                    mapping.chunkIndex = index;
+                    mapping.chunkDigest = (String) finalDigest;
+                    return mapping.persist();
+                })).replaceWithVoid();
     }
 
     @Override
     public Uni<byte[]> readRange(String bucketName, ObjMetadata metadata, long offset, long length) {
-        if (offset < 0 || length < 0 || offset >= metadata.size) {
-            throw new ValidationException("Invalid range: offset=" + offset + ", length=" + length);
+        if (offset < 0 || length < 1 || offset >= metadata.size) {
+            return Uni.createFrom().failure(new ValidationException("Invalid range request"));
         }
 
         long actualLength = Math.min(length, metadata.size - offset);
-        if (actualLength == 0) {
-            return Uni.createFrom().item(new byte[0]);
-        }
 
-        // Fetch chunkSize from bucket.
         return space.maatini.objectstore.entity.ObjBucket.findById(metadata.bucketId)
                 .flatMap(bucketEntity -> {
                     space.maatini.objectstore.entity.ObjBucket bucket = (space.maatini.objectstore.entity.ObjBucket) bucketEntity;
@@ -129,57 +148,74 @@ public class PostgresChunkRepository implements ObjectStorageRepository {
                     int startChunk = (int) (offset / chunkSize);
                     int endChunk = (int) ((offset + actualLength - 1) / chunkSize);
 
-                    return ObjChunk.findOrderedByMetadataAndRange(metadata.id, startChunk, endChunk)
-                            .map(chunks -> {
+                    return ObjMetadataChunk.findOrderedByMetadataAndRange(metadata.id, startChunk, endChunk)
+                            .flatMap(mappings -> {
                                 ByteArrayOutputStream output = new ByteArrayOutputStream((int) actualLength);
-                                long currentPos = (long) startChunk * chunkSize;
 
-                                for (ObjChunk chunk : chunks) {
-                                    long chunkEnd = currentPos + chunk.size;
+                                // Process mappings sequentially to avoids concurrent session issues
+                                return Multi.createFrom().iterable(mappings)
+                                        .onItem()
+                                        .transformToUniAndConcatenate(
+                                                m -> ObjSharedChunk.<ObjSharedChunk>findById(m.chunkDigest)
+                                                        .invoke(chunk -> {
+                                                            if (chunk == null) {
+                                                                LOG.warnf("Chunk not found for digest: %s",
+                                                                        m.chunkDigest);
+                                                                return;
+                                                            }
+                                                            int chunkIdx = mappings.indexOf(m);
+                                                            long currentPos = (long) (startChunk + chunkIdx)
+                                                                    * chunkSize;
+                                                            long chunkEnd = currentPos + chunk.size;
 
-                                    long sliceStart = Math.max(offset, currentPos);
-                                    long sliceEnd = Math.min(offset + actualLength, chunkEnd);
+                                                            long sliceStart = Math.max(offset, currentPos);
+                                                            long sliceEnd = Math.min(offset + actualLength, chunkEnd);
 
-                                    if (sliceStart < sliceEnd) {
-                                        int startOffsetInChunk = (int) (sliceStart - currentPos);
-                                        int lengthInChunk = (int) (sliceEnd - sliceStart);
-                                        output.write(chunk.data, startOffsetInChunk, lengthInChunk);
-                                    }
-                                    currentPos = chunkEnd;
-                                }
-                                return output.toByteArray();
+                                                            if (sliceStart < sliceEnd) {
+                                                                int startOffsetInChunk = (int) (sliceStart
+                                                                        - currentPos);
+                                                                int lengthInChunk = (int) (sliceEnd - sliceStart);
+                                                                output.write(chunk.data, startOffsetInChunk,
+                                                                        lengthInChunk);
+                                                            }
+                                                        }))
+                                        .collect().asList()
+                                        .map(v -> {
+                                            byte[] result = output.toByteArray();
+                                            return result;
+                                        });
                             });
                 });
     }
 
     @Override
     public Uni<Void> delete(String bucketName, ObjMetadata metadata) {
-        return ObjChunk.deleteByMetadata(metadata.id)
+        return ObjMetadataChunk.delete("metadataId", metadata.id)
                 .replaceWithVoid();
     }
 
     @Override
     public Uni<Boolean> verifyIntegrity(String bucketName, ObjMetadata metadata) {
-        return ObjChunk.findByMetadataOrdered(metadata.id)
-                .map(chunks -> {
+        return ObjMetadataChunk.findOrderedByMetadata(metadata.id)
+                .flatMap(mappings -> {
                     try {
                         MessageDigest digest = MessageDigest.getInstance(metadata.digestAlgorithm);
-                        for (ObjChunk chunk : chunks) {
-                            digest.update(chunk.data);
-                        }
-                        String computed = HexFormat.of().formatHex(digest.digest());
-                        boolean valid = computed.equals(metadata.digest);
 
-                        if (!valid) {
-                            LOG.warnf("Integrity check failed for object %s: expected=%s, computed=%s",
-                                    metadata.id, metadata.digest, computed);
-                        }
-
-                        return valid;
+                        // Process chunks sequentially for integrity check
+                        return Multi.createFrom().iterable(mappings)
+                                .onItem()
+                                .transformToUniAndConcatenate(
+                                        m -> ObjSharedChunk.<ObjSharedChunk>findById(m.chunkDigest)
+                                                .invoke(chunk -> digest.update(chunk.data)))
+                                .collect().asList()
+                                .map(v -> {
+                                    String computed = HexFormat.of().formatHex(digest.digest());
+                                    return computed.equals(metadata.digest);
+                                });
                     } catch (NoSuchAlgorithmException e) {
-                        throw new RuntimeException("Hash algorithm not available: " + metadata.digestAlgorithm,
-                                e);
+                        return Uni.createFrom().failure(e);
                     }
-                });
+                })
+                .onItem().ifNull().continueWith(metadata.size == 0);
     }
 }

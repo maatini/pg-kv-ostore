@@ -122,90 +122,37 @@ class ObjEntityTest {
         assertEquals("SHA-256", metadata.digestAlgorithm);
     }
 
-    // ==================== ObjChunk Tests ====================
+    // ==================== ObjSharedChunk Tests ====================
 
     @Test
-    void testObjChunk_Creation() {
-        ObjChunk chunk = new ObjChunk();
-        chunk.id = UUID.randomUUID();
-        chunk.chunkIndex = 0;
-        chunk.data = "chunk data".getBytes();
+    void testObjSharedChunk_Creation() {
+        ObjSharedChunk chunk = new ObjSharedChunk();
+        chunk.digest = "sha256:abc123def";
+        chunk.data = "shared data".getBytes();
         chunk.size = chunk.data.length;
-        chunk.digest = "chunkdigest";
+        chunk.createdAt = OffsetDateTime.now();
 
-        assertNotNull(chunk.id);
-        assertEquals(0, chunk.chunkIndex);
-        assertNotNull(chunk.data);
+        assertEquals("sha256:abc123def", chunk.digest);
+        assertArrayEquals("shared data".getBytes(), chunk.data);
         assertEquals(chunk.data.length, chunk.size);
-        assertEquals("chunkdigest", chunk.digest);
+        assertNotNull(chunk.createdAt);
     }
 
+    // ==================== ObjMetadataChunk Tests ====================
+
     @Test
-    void testObjChunk_WithMetadataId() {
+    void testObjMetadataChunk_Creation() {
         UUID metadataId = UUID.randomUUID();
+        ObjMetadataChunk mapping = new ObjMetadataChunk();
+        mapping.id = UUID.randomUUID();
+        mapping.metadataId = metadataId;
+        mapping.chunkIndex = 0;
+        mapping.chunkDigest = "sha256:abc123def";
 
-        ObjChunk chunk = new ObjChunk();
-        chunk.metadataId = metadataId;
-        chunk.chunkIndex = 5;
-        chunk.data = new byte[1024];
-        chunk.size = 1024;
-
-        assertEquals(metadataId, chunk.metadataId);
-        assertEquals(5, chunk.chunkIndex);
-    }
-
-    @Test
-    void testObjChunk_Ordering() {
-        ObjChunk chunk0 = new ObjChunk();
-        chunk0.chunkIndex = 0;
-
-        ObjChunk chunk1 = new ObjChunk();
-        chunk1.chunkIndex = 1;
-
-        ObjChunk chunk2 = new ObjChunk();
-        chunk2.chunkIndex = 2;
-
-        assertTrue(chunk0.chunkIndex < chunk1.chunkIndex);
-        assertTrue(chunk1.chunkIndex < chunk2.chunkIndex);
-    }
-
-    @Test
-    void testObjChunk_BinaryData() {
-        byte[] binaryData = new byte[256];
-        for (int i = 0; i < 256; i++) {
-            binaryData[i] = (byte) i;
-        }
-
-        ObjChunk chunk = new ObjChunk();
-        chunk.data = binaryData;
-        chunk.size = binaryData.length;
-
-        assertEquals(256, chunk.size);
-        for (int i = 0; i < 256; i++) {
-            assertEquals((byte) i, chunk.data[i]);
-        }
-    }
-
-    @Test
-    void testObjChunk_FullSizeChunk() {
-        int oneM = 1024 * 1024;
-        byte[] data = new byte[oneM];
-
-        ObjChunk chunk = new ObjChunk();
-        chunk.data = data;
-        chunk.size = oneM;
-
-        assertEquals(oneM, chunk.size);
-    }
-
-    @Test
-    void testObjChunk_PartialLastChunk() {
-        ObjChunk chunk = new ObjChunk();
-        chunk.chunkIndex = 5;
-        chunk.data = new byte[500]; // Partial chunk
-        chunk.size = 500;
-
-        assertEquals(500, chunk.size);
+        assertNotNull(mapping.id);
+        assertEquals(metadataId, mapping.metadataId);
+        assertEquals(0, mapping.chunkIndex);
+        assertEquals("sha256:abc123def", mapping.chunkDigest);
     }
 
     // ==================== JsonbMapConverter Tests ====================

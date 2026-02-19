@@ -5,7 +5,6 @@ import space.maatini.common.exception.NotFoundException;
 import space.maatini.objectstore.dto.ObjBucketDto;
 import space.maatini.objectstore.dto.ObjMetadataDto;
 import space.maatini.objectstore.entity.ObjBucket;
-import space.maatini.objectstore.entity.ObjChunk;
 import space.maatini.objectstore.entity.ObjMetadata;
 import space.maatini.objectstore.repository.ObjectStorageRepository;
 import io.smallrye.mutiny.Multi;
@@ -15,6 +14,7 @@ import jakarta.enterprise.inject.Any;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import io.quarkus.hibernate.reactive.panache.Panache;
 import io.quarkus.hibernate.reactive.panache.common.WithSession;
 import io.quarkus.hibernate.reactive.panache.common.WithTransaction;
 import org.jboss.logging.Logger;
@@ -65,7 +65,6 @@ public class ObjectStoreService {
 
     @WithTransaction
     public Uni<ObjBucket> createBucket(ObjBucketDto.CreateRequest request) {
-        LOG.debugf("Creating object bucket: %s", request.name);
 
         return dbUtils.setupTenant()
                 .flatMap(v -> ObjBucket.existsByName(request.name, tenantContext.getTenantId()))
@@ -138,7 +137,8 @@ public class ObjectStoreService {
 
     // ==================== Object Operations ====================
 
-    @WithTransaction
+    // @WithTransaction // Removed to allow granular control and avoid long-running
+    // Tx
     public Uni<ObjMetadata> putObject(
             String bucketName,
             String objectName,
@@ -173,17 +173,50 @@ public class ObjectStoreService {
                     metadata.description = description;
                     metadata.headers = headers;
                     metadata.tenantId = tenantContext.getTenantId();
+                    metadata.status = ObjMetadata.Status.UPLOADING;
 
-                    return metadata.<ObjMetadata>persist()
-                            .flatMap(m -> {
-                                return getRepository()
-                                        .save(bucketName, m, dataStream, bucket.chunkSize, bucket.maxObjectSize)
-                                        .flatMap(finalMetadata -> finalMetadata.<ObjMetadata>persist())
-                                        .invoke(fm -> LOG.infof("Stored object: %s/%s (size=%d, chunks=%d, digest=%s)",
-                                                bucketName, objectName, fm.size, fm.chunkCount, fm.digest))
-                                        .invoke(fm -> watchService
-                                                .notifyChange(ObjMetadataDto.WatchEvent.fromPut(fm, bucketName)));
-                            });
+                    // 1. Persist metadata in INITIAL transaction
+                    return Uni.createFrom().deferred(() -> {
+                        return Panache.withTransaction(() -> metadata.<ObjMetadata>persist())
+                                .flatMap(m -> {
+                                    // 2. Perform streaming upload OUTSIDE the metadata transaction
+                                    // The repository logic (PostgresChunkRepository) will manage its own chunk
+                                    // transactions
+                                    return getRepository()
+                                            .save(bucketName, (ObjMetadata) m, dataStream, bucket.chunkSize,
+                                                    bucket.maxObjectSize)
+                                            .flatMap(finalMetadata -> {
+                                                // 3. Finalize in a NEW transaction
+                                                return Panache.withTransaction(() -> {
+                                                    return ObjMetadata.<ObjMetadata>findById(finalMetadata.id)
+                                                            .flatMap(m2 -> {
+                                                                m2.size = finalMetadata.size;
+                                                                m2.chunkCount = finalMetadata.chunkCount;
+                                                                m2.digest = finalMetadata.digest;
+                                                                m2.status = ObjMetadata.Status.COMPLETED;
+                                                                return m2.persist();
+                                                            });
+                                                })
+                                                        .map(fm -> (ObjMetadata) fm)
+                                                        .invoke(fm -> LOG.infof(
+                                                                "Stored object: %s/%s (size=%d, chunks=%d, digest=%s, status=%s)",
+                                                                bucketName, objectName, fm.size,
+                                                                fm.chunkCount,
+                                                                fm.digest, fm.status))
+                                                        .invoke(fm -> watchService
+                                                                .notifyChange(ObjMetadataDto.WatchEvent
+                                                                        .fromPut(fm, bucketName)));
+                                            })
+                                            .onFailure().call(e -> {
+                                                LOG.errorf(e, "Failed to store object: %s/%s", bucketName, objectName);
+                                                // 4. Mark as FAILED on error
+                                                return Panache.withTransaction(() -> {
+                                                    metadata.status = ObjMetadata.Status.FAILED;
+                                                    return metadata.persist();
+                                                });
+                                            });
+                                });
+                    });
                 });
     }
 
@@ -197,18 +230,6 @@ public class ObjectStoreService {
     public Uni<List<ObjMetadata>> listObjects(String bucketName) {
         return getBucket(bucketName)
                 .flatMap(bucket -> ObjMetadata.findByBucket(bucket.id));
-    }
-
-    /**
-     * Get a streaming Multi of object chunks.
-     * Note: This primarily works for Postgres backend which uses chunking.
-     * For stream-based backends, this might return empty if chunks are not stored.
-     */
-    public Multi<ObjChunk> getObjectChunks(String bucketName, String objectName) {
-        return getMetadata(bucketName, objectName)
-                .onItem()
-                .transformToMulti(metadata -> ObjChunk.findByMetadataOrdered(metadata.id)
-                        .onItem().transformToMulti(chunks -> Multi.createFrom().iterable(chunks)));
     }
 
     /**
