@@ -268,27 +268,14 @@ Alle Tests verwenden reaktive Asserter (`TransactionalUniAsserter`), um die Inte
   ./mvnw verify -Dquarkus.test.integration-test-profile=test
   ```
 
-## Benchmark Ergebnisse
+### Benchmark Ergebnisse
 
-Der Service wurde einem Lasttest (1000 Operationen, Concurrency 20) unterzogen, um die Leistungsfähigkeit des reaktiven Stacks zu demonstrieren.
+Hier sind die Ergebnisse des `SimpleBenchmarkTest` (1000 Operationen, 20 Threads):
 
-> [!NOTE]
-> Die Ergebnisse können je nach Hardware und Datenbankkonfiguration (z.B. SSD vs. HDD, Netzwerk-Latenz) variieren. Der reaktive Stack ermöglicht jedoch eine effiziente Nutzung der Ressourcen bei hoher Nebenläufigkeit.
->
-> **WRITE RESULTS:**
-> Total Time: 1132 ms
-> Throughput: 883,39 ops/sec
-> Avg Latency: 1,13 ms/op
->
-> **READ RESULTS:**
-> Total Time: 275 ms
-> Throughput: 3636,36 ops/sec
-> Avg Latency: 0,28 ms/op
-
-| Operation | Durchsatz (ops/sec) | Latenz (ms/op) |
-|-----------|----------------------|----------------|
-| **Write** | 883.39               | 1.13           |
-| **Read**  | 3636.36              | 0.28           |
+| Operation | Durchschnittliche Latenz | Durchsatz (ops/sec) |
+| :--- | :--- | :--- |
+| **Write** | 1.20 ms/op | 831.26 |
+| **Read** | 0.62 ms/op | 1615.51 |
 
 *Getestet auf lokaler Hardware mit PostgreSQL 16 (reaktiver Treiber).*
 
@@ -377,7 +364,10 @@ graph TD
         R2[Object Resources]
         W1[WebSocket Endpoints]
     end
-
+ - [x] Execute benchmarks <!-- id: 3 -->
+    - [x] Run `SimpleBenchmarkTest` <!-- id: 4 -->
+- [x] Update performance data in `README.md` <!-- id: 5 -->
+- [x] Update `walkthrough.md` <!-- id: 6 -->
     subgraph "Service Layer (Mutiny & Vert.x)"
         S1[KV Service]
         S2[Object Store Service]
