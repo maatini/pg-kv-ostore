@@ -22,16 +22,24 @@ public class DatabaseUtils {
      */
     public Uni<Void> setupTenant() {
         String tenantId = tenantContext.getTenantId();
+
+        LOG.debugf("Setting app.current_tenant to %s (is_local=true)", tenantId);
+
+        // Pass the tenantId directly (it can be null, which resets the setting for the
+        // transaction)
         if (tenantId == null) {
-            LOG.debug("No tenant ID found in context, skipping RLS setup");
-            return Uni.createFrom().voidItem();
+            return Panache.getSession()
+                    .flatMap(session -> session.createNativeQuery("SELECT set_config('app.current_tenant', NULL, true)")
+                            .getSingleResult()
+                            .onFailure().invoke(t -> LOG.errorf("Failed to clear tenant context: %s", t.getMessage()))
+                            .replaceWithVoid());
         }
 
-        LOG.debugf("Setting app.current_tenant to %s", tenantId);
         return Panache.getSession()
                 .flatMap(session -> session.createNativeQuery("SELECT set_config('app.current_tenant', :tenant, true)")
                         .setParameter("tenant", tenantId)
                         .getSingleResult()
+                        .onFailure().invoke(t -> LOG.errorf("Failed to set tenant context: %s", t.getMessage()))
                         .replaceWithVoid());
     }
 }

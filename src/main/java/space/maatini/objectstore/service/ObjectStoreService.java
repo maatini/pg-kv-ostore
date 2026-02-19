@@ -67,7 +67,8 @@ public class ObjectStoreService {
     public Uni<ObjBucket> createBucket(ObjBucketDto.CreateRequest request) {
         LOG.debugf("Creating object bucket: %s", request.name);
 
-        return ObjBucket.existsByName(request.name)
+        return dbUtils.setupTenant()
+                .flatMap(v -> ObjBucket.existsByName(request.name, tenantContext.getTenantId()))
                 .flatMap(exists -> {
                     if (exists) {
                         throw new ConflictException("Object bucket already exists: " + request.name);
@@ -75,6 +76,7 @@ public class ObjectStoreService {
 
                     ObjBucket bucket = new ObjBucket();
                     bucket.name = request.name;
+                    bucket.tenantId = tenantContext.getTenantId();
                     bucket.description = request.description;
                     bucket.chunkSize = request.chunkSize != null ? request.chunkSize : chunkSize;
                     bucket.maxObjectSize = request.maxObjectSize != null ? request.maxObjectSize : maxObjectSize;
@@ -85,12 +87,15 @@ public class ObjectStoreService {
     }
 
     public Uni<ObjBucket> getBucket(String name) {
-        return ObjBucket.findByName(name)
+        return dbUtils.setupTenant()
+                .flatMap(v -> ObjBucket.findByName(name, tenantContext.getTenantId()))
                 .onItem().ifNull().failWith(() -> new NotFoundException("Object bucket not found: " + name));
     }
 
     public Uni<List<ObjBucket>> listBuckets() {
-        return ObjBucket.listAll();
+        String tenantId = tenantContext.getTenantId();
+        return dbUtils.setupTenant()
+                .flatMap(v -> ObjBucket.<ObjBucket>list("tenantId IS NOT DISTINCT FROM ?1", tenantId));
     }
 
     @WithTransaction

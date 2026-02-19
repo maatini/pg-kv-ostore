@@ -19,8 +19,11 @@ public class KvBucket extends PanacheEntityBase {
     @Column(name = "id", updatable = false, nullable = false)
     public UUID id;
 
-    @Column(name = "name", unique = true, nullable = false, length = 255)
+    @Column(name = "name", nullable = false, length = 255)
     public String name;
+
+    @Column(name = "tenant_id", length = 255)
+    public String tenantId;
 
     @Column(name = "description", columnDefinition = "TEXT")
     public String description;
@@ -52,11 +55,11 @@ public class KvBucket extends PanacheEntityBase {
     }
 
     // Panache Finder Methods
-    public static Uni<KvBucket> findByName(String name) {
-        return find("name", name).firstResult();
+    public static Uni<KvBucket> findByName(String name, String tenantId) {
+        return find("name = ?1 and tenantId IS NOT DISTINCT FROM ?2", name, tenantId).firstResult();
     }
 
-    public static Uni<Boolean> existsByName(String name) {
-        return count("name", name).map(count -> count > 0);
+    public static Uni<Boolean> existsByName(String name, String tenantId) {
+        return count("name = ?1 and tenantId IS NOT DISTINCT FROM ?2", name, tenantId).map(count -> count > 0);
     }
 }

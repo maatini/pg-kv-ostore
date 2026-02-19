@@ -51,7 +51,8 @@ public class KvService {
     public Uni<KvBucket> createBucket(KvBucketDto.CreateRequest request) {
         LOG.debugf("Creating bucket: %s", request.name);
 
-        return KvBucket.existsByName(request.name)
+        return dbUtils.setupTenant()
+                .flatMap(v -> KvBucket.existsByName(request.name, tenantContext.getTenantId()))
                 .flatMap(exists -> {
                     if (exists) {
                         throw new ConflictException(
@@ -60,6 +61,7 @@ public class KvService {
 
                     KvBucket bucket = new KvBucket();
                     bucket.name = request.name;
+                    bucket.tenantId = tenantContext.getTenantId();
                     bucket.description = request.description;
                     bucket.maxValueSize = request.maxValueSize != null ? request.maxValueSize : maxValueSize;
                     bucket.maxHistoryPerKey = request.maxHistoryPerKey != null ? request.maxHistoryPerKey
@@ -72,13 +74,16 @@ public class KvService {
     }
 
     public Uni<KvBucket> getBucket(String name) {
-        return KvBucket.findByName(name)
+        return dbUtils.setupTenant()
+                .flatMap(v -> KvBucket.findByName(name, tenantContext.getTenantId()))
                 .onItem().ifNull()
                 .failWith(() -> new NotFoundException("Bucket not found: " + name));
     }
 
     public Uni<List<KvBucket>> listBuckets() {
-        return KvBucket.listAll();
+        String tenantId = tenantContext.getTenantId();
+        return dbUtils.setupTenant()
+                .flatMap(v -> KvBucket.<KvBucket>list("tenantId IS NOT DISTINCT FROM ?1", tenantId));
     }
 
     @WithTransaction
