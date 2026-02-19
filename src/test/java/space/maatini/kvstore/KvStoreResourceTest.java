@@ -17,237 +17,277 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class KvStoreResourceTest {
 
-    private static final String BUCKET_NAME = "test-bucket";
-    private static final String TEST_KEY = "test-key";
-    private static final String TEST_VALUE = "Hello, World!";
+        private static final String BUCKET_NAME = "test-bucket";
+        private static final String TEST_KEY = "test-key";
+        private static final String TEST_VALUE = "Hello, World!";
 
-    @Test
-    @Order(1)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testCreateBucket() {
-        KvBucketDto.CreateRequest request = new KvBucketDto.CreateRequest();
-        request.name = BUCKET_NAME;
-        request.description = "Test bucket";
+        @Test
+        @Order(1)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testCreateBucket() {
+                KvBucketDto.CreateRequest request = new KvBucketDto.CreateRequest();
+                request.name = BUCKET_NAME;
+                request.description = "Test bucket";
 
-        given()
-                .contentType(ContentType.JSON)
-                .body(request)
-                .when()
-                .post("/api/v1/kv/buckets")
-                .then()
-                .statusCode(201)
-                .body("name", equalTo(BUCKET_NAME))
-                .body("id", notNullValue());
-    }
+                given()
+                                .contentType(ContentType.JSON)
+                                .body(request)
+                                .when()
+                                .post("/api/v1/kv/buckets")
+                                .then()
+                                .statusCode(201)
+                                .body("name", equalTo(BUCKET_NAME))
+                                .body("id", notNullValue());
+        }
 
-    @Test
-    @Order(2)
-    @TestSecurity(user = "user", roles = { "kv-read" })
-    public void testListBuckets() {
-        given()
-                .when()
-                .get("/api/v1/kv/buckets")
-                .then()
-                .statusCode(200)
-                .body("$", hasSize(greaterThanOrEqualTo(1)))
-                .body("name", hasItem(BUCKET_NAME));
-    }
+        @Test
+        @Order(2)
+        @TestSecurity(user = "user", roles = { "kv-read" })
+        public void testListBuckets() {
+                given()
+                                .when()
+                                .get("/api/v1/kv/buckets")
+                                .then()
+                                .statusCode(200)
+                                .body("$", hasSize(greaterThanOrEqualTo(1)))
+                                .body("name", hasItem(BUCKET_NAME));
+        }
 
-    @Test
-    @Order(3)
-    @TestSecurity(user = "user", roles = { "kv-read" })
-    public void testGetBucket() {
-        given()
-                .when()
-                .get("/api/v1/kv/buckets/{name}", BUCKET_NAME)
-                .then()
-                .statusCode(200)
-                .body("name", equalTo(BUCKET_NAME));
-    }
+        @Test
+        @Order(3)
+        @TestSecurity(user = "user", roles = { "kv-read" })
+        public void testGetBucket() {
+                given()
+                                .when()
+                                .get("/api/v1/kv/buckets/{name}", BUCKET_NAME)
+                                .then()
+                                .statusCode(200)
+                                .body("name", equalTo(BUCKET_NAME));
+        }
 
-    @Test
-    @Order(4)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testPutKey() {
-        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = TEST_VALUE;
-        request.base64 = false;
+        @Test
+        @Order(4)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testPutKey() {
+                KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+                request.value = TEST_VALUE;
+                request.base64 = false;
 
-        given()
-                .contentType(ContentType.JSON)
-                .body(request)
-                .when()
-                .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
-                .then()
-                .statusCode(200)
-                .body("key", equalTo(TEST_KEY))
-                .body("revision", equalTo(1))
-                .body("operation", equalTo("PUT"));
-    }
+                given()
+                                .contentType(ContentType.JSON)
+                                .body(request)
+                                .when()
+                                .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
+                                .then()
+                                .statusCode(200)
+                                .body("key", equalTo(TEST_KEY))
+                                .body("revision", equalTo(1))
+                                .body("operation", equalTo("PUT"));
+        }
 
-    @Test
-    @Order(5)
-    @TestSecurity(user = "user", roles = { "kv-read" })
-    public void testGetKey() {
-        given()
-                .when()
-                .get("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
-                .then()
-                .statusCode(200)
-                .body("key", equalTo(TEST_KEY))
-                .body("value", notNullValue())
-                .body("revision", equalTo(1));
-    }
+        @Test
+        @Order(5)
+        @TestSecurity(user = "user", roles = { "kv-read" })
+        public void testGetKey() {
+                given()
+                                .when()
+                                .get("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
+                                .then()
+                                .statusCode(200)
+                                .body("key", equalTo(TEST_KEY))
+                                .body("value", notNullValue())
+                                .body("revision", equalTo(1));
+        }
 
-    @Test
-    @Order(6)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testUpdateKey() {
-        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = "Updated value";
-        request.base64 = false;
+        @Test
+        @Order(6)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testUpdateKey() {
+                KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+                request.value = "Updated value";
+                request.base64 = false;
 
-        given()
-                .contentType(ContentType.JSON)
-                .body(request)
-                .when()
-                .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
-                .then()
-                .statusCode(200)
-                .body("revision", equalTo(2));
-    }
+                given()
+                                .contentType(ContentType.JSON)
+                                .body(request)
+                                .when()
+                                .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
+                                .then()
+                                .statusCode(200)
+                                .body("revision", equalTo(2));
+        }
 
-    @Test
-    @Order(7)
-    @TestSecurity(user = "user", roles = { "kv-read" })
-    public void testGetKeyHistory() {
-        given()
-                .queryParam("limit", 10)
-                .when()
-                .get("/api/v1/kv/buckets/{bucket}/keys/{key}/history", BUCKET_NAME, TEST_KEY)
-                .then()
-                .statusCode(200)
-                .body("$", hasSize(2))
-                .body("revision", hasItems(2, 1));
-    }
+        @Test
+        @Order(7)
+        @TestSecurity(user = "user", roles = { "kv-read" })
+        public void testGetKeyHistory() {
+                given()
+                                .queryParam("limit", 10)
+                                .when()
+                                .get("/api/v1/kv/buckets/{bucket}/keys/{key}/history", BUCKET_NAME, TEST_KEY)
+                                .then()
+                                .statusCode(200)
+                                .body("$", hasSize(2))
+                                .body("revision", hasItems(2, 1));
+        }
 
-    @Test
-    @Order(8)
-    @TestSecurity(user = "user", roles = { "kv-read" })
-    public void testGetSpecificRevision() {
-        given()
-                .when()
-                .get("/api/v1/kv/buckets/{bucket}/keys/{key}/revision/{revision}",
-                        BUCKET_NAME, TEST_KEY, 1)
-                .then()
-                .statusCode(200)
-                .body("revision", equalTo(1));
-    }
+        @Test
+        @Order(8)
+        @TestSecurity(user = "user", roles = { "kv-read" })
+        public void testGetSpecificRevision() {
+                given()
+                                .when()
+                                .get("/api/v1/kv/buckets/{bucket}/keys/{key}/revision/{revision}",
+                                                BUCKET_NAME, TEST_KEY, 1)
+                                .then()
+                                .statusCode(200)
+                                .body("revision", equalTo(1));
+        }
 
-    @Test
-    @Order(9)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testDeleteKey() {
-        given()
-                .when()
-                .delete("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
-                .then()
-                .statusCode(200)
-                .body("operation", equalTo("DELETE"))
-                .body("revision", equalTo(3));
-    }
+        @Test
+        @Order(9)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testDeleteKey() {
+                given()
+                                .when()
+                                .delete("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
+                                .then()
+                                .statusCode(200)
+                                .body("operation", equalTo("DELETE"))
+                                .body("revision", equalTo(3));
+        }
 
-    @Test
-    @Order(10)
-    @TestSecurity(user = "user", roles = { "kv-read" })
-    public void testGetDeletedKey() {
-        given()
-                .when()
-                .get("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
-                .then()
-                .statusCode(404);
-    }
+        @Test
+        @Order(10)
+        @TestSecurity(user = "user", roles = { "kv-read" })
+        public void testGetDeletedKey() {
+                given()
+                                .when()
+                                .get("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, TEST_KEY)
+                                .then()
+                                .statusCode(404);
+        }
 
-    @Test
-    @Order(11)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testPurgeKey() {
-        // First put a new value
-        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
-        request.value = "New value";
-        request.base64 = false;
+        @Test
+        @Order(11)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testPurgeKey() {
+                // First put a new value
+                KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+                request.value = "New value";
+                request.base64 = false;
 
-        given()
-                .contentType(ContentType.JSON)
-                .body(request)
-                .when()
-                .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, "purge-key")
-                .then()
-                .statusCode(200);
+                given()
+                                .contentType(ContentType.JSON)
+                                .body(request)
+                                .when()
+                                .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, "purge-key")
+                                .then()
+                                .statusCode(200);
 
-        // Then purge it
-        given()
-                .when()
-                .delete("/api/v1/kv/buckets/{bucket}/keys/{key}/purge", BUCKET_NAME, "purge-key")
-                .then()
-                .statusCode(200)
-                .body("count", greaterThanOrEqualTo(1));
-    }
+                // Then purge it
+                given()
+                                .when()
+                                .delete("/api/v1/kv/buckets/{bucket}/keys/{key}/purge", BUCKET_NAME, "purge-key")
+                                .then()
+                                .statusCode(200)
+                                .body("count", greaterThanOrEqualTo(1));
+        }
 
-    @Test
-    @Order(100)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testDeleteBucket() {
-        given()
-                .when()
-                .delete("/api/v1/kv/buckets/{name}", BUCKET_NAME)
-                .then()
-                .statusCode(204);
-    }
+        @Test
+        @Order(100)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testDeleteBucket() {
+                given()
+                                .when()
+                                .delete("/api/v1/kv/buckets/{name}", BUCKET_NAME)
+                                .then()
+                                .statusCode(204);
+        }
 
-    @Test
-    @Order(101)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testBucketNotFound() {
-        given()
-                .when()
-                .get("/api/v1/kv/buckets/{name}", "non-existent-bucket")
-                .then()
-                .statusCode(404)
-                .body("error", equalTo("Not Found"));
-    }
+        @Test
+        @Order(101)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testBucketNotFound() {
+                given()
+                                .when()
+                                .get("/api/v1/kv/buckets/{name}", "non-existent-bucket")
+                                .then()
+                                .statusCode(404)
+                                .body("error", equalTo("Not Found"));
+        }
 
-    @Test
-    @Order(102)
-    @TestSecurity(user = "admin", roles = { "admin" })
-    public void testDuplicateBucket() {
-        KvBucketDto.CreateRequest request = new KvBucketDto.CreateRequest();
-        request.name = "duplicate-test";
+        @Test
+        @Order(102)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testDuplicateBucket() {
+                KvBucketDto.CreateRequest request = new KvBucketDto.CreateRequest();
+                request.name = "duplicate-test";
 
-        // Create first
-        given()
-                .contentType(ContentType.JSON)
-                .body(request)
-                .when()
-                .post("/api/v1/kv/buckets")
-                .then()
-                .statusCode(201);
+                // Create first
+                given()
+                                .contentType(ContentType.JSON)
+                                .body(request)
+                                .when()
+                                .post("/api/v1/kv/buckets")
+                                .then()
+                                .statusCode(201);
 
-        // Try to create duplicate
-        given()
-                .contentType(ContentType.JSON)
-                .body(request)
-                .when()
-                .post("/api/v1/kv/buckets")
-                .then()
-                .statusCode(409)
-                .body("error", equalTo("Conflict"));
+                // Try to create duplicate
+                given()
+                                .contentType(ContentType.JSON)
+                                .body(request)
+                                .when()
+                                .post("/api/v1/kv/buckets")
+                                .then()
+                                .statusCode(409)
+                                .body("error", equalTo("Conflict"));
 
-        // Cleanup
-        given()
-                .when()
-                .delete("/api/v1/kv/buckets/{name}", "duplicate-test")
-                .then()
-                .statusCode(204);
-    }
+                // Cleanup
+                given()
+                                .when()
+                                .delete("/api/v1/kv/buckets/{name}", "duplicate-test")
+                                .then()
+                                .statusCode(204);
+        }
+
+        @Test
+        @Order(11)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testConcurrentCas_OnlyOneWins() {
+                String key = "concurrent-cas-key";
+                KvEntryDto.PutRequest initial = new KvEntryDto.PutRequest();
+                initial.value = "v1";
+
+                // 1. Initial Put
+                given()
+                                .contentType(ContentType.JSON)
+                                .body(initial)
+                                .when()
+                                .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, key)
+                                .then()
+                                .statusCode(200)
+                                .body("revision", equalTo(1));
+
+                // 2. Multiple concurrent CAS requests
+                java.util.List<Integer> statuses = java.util.stream.IntStream.range(0, 5).parallel()
+                                .mapToObj(i -> {
+                                        KvEntryDto.PutRequest req = new KvEntryDto.PutRequest();
+                                        req.value = "v2-" + i;
+                                        return given()
+                                                        .contentType(ContentType.JSON)
+                                                        .queryParam("expectedRevision", 1)
+                                                        .body(req)
+                                                        .when()
+                                                        .put("/api/v1/kv/buckets/{bucket}/keys/{key}", BUCKET_NAME, key)
+                                                        .then()
+                                                        .extract().statusCode();
+                                }).collect(java.util.stream.Collectors.toList());
+
+                long successCount = statuses.stream().filter(s -> s == 200).count();
+                long conflictCount = statuses.stream().filter(s -> s == 409).count();
+
+                Assertions.assertEquals(1, successCount, "Exactly one request should succeed");
+                Assertions.assertEquals(4, conflictCount, "Remaining 4 requests should fail with 409 Conflict");
+        }
 }

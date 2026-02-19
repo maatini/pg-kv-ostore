@@ -7,6 +7,8 @@ import space.maatini.kvstore.dto.KvBucketDto;
 import space.maatini.kvstore.dto.KvEntryDto;
 import space.maatini.kvstore.entity.KvBucket;
 import space.maatini.kvstore.entity.KvEntry;
+import io.smallrye.mutiny.Uni;
+import space.maatini.common.util.TenantContext;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.vertx.RunOnVertxContext;
@@ -16,7 +18,11 @@ import org.junit.jupiter.api.*;
 import org.mockito.Mockito;
 
 import java.util.Base64;
+import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -31,6 +37,9 @@ class KvServiceTest {
 
     @Inject
     KvService kvService;
+
+    @Inject
+    TenantContext tenantContext;
 
     @InjectMock
     KvWatchService watchService;
@@ -567,5 +576,33 @@ class KvServiceTest {
             // Expected revision 0, but it exists (rev 1)
             return kvService.cas(TEST_BUCKET, "cas-create-conflict-key", casRequest, 0L);
         }, ConflictException.class);
+    }
+
+    @Test
+    @Order(61)
+    @RunOnVertxContext
+    void testCrossTenantReadDenied(TransactionalUniAsserter asserter) {
+        String key = "secret-key";
+        String bucketName = "tenant-bucket";
+        KvEntryDto.PutRequest request = new KvEntryDto.PutRequest();
+        request.value = "secret-data";
+
+        // Tenant A erstellt Bucket und schreibt
+        asserter.execute(() -> {
+            tenantContext.setTenantId("tenant-a");
+            KvBucketDto.CreateRequest bucketReq = new KvBucketDto.CreateRequest();
+            bucketReq.name = bucketName;
+            return kvService.createBucket(bucketReq)
+                    .chain(() -> kvService.put(bucketName, key, request));
+        });
+
+        // Tenant B versucht zu lesen
+        asserter.execute(() -> {
+            tenantContext.setTenantId("tenant-b");
+            // Tenant B sollte den Bucket/Key nicht finden (RLS Isolation)
+            return kvService.get(bucketName, key)
+                    .onFailure(NotFoundException.class).recoverWithItem((KvEntry) null)
+                    .invoke(entry -> assertNull(entry, "Tenant B darf Key von Tenant A nicht sehen"));
+        });
     }
 }

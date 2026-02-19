@@ -44,19 +44,25 @@ ALTER TABLE obj_buckets ALTER COLUMN chunk_size SET DEFAULT 4194304;
 -- Our values are currently BYTEA. 
 -- Let's stick to what we decided in the plan.
 
--- 5. Update existing functions to use TEXT for parameters (cleaner)
+-- 5. Drop old function versions to avoid overloading issues (VARCHAR vs TEXT)
+DROP FUNCTION IF EXISTS get_next_revision(UUID, VARCHAR);
+DROP FUNCTION IF EXISTS kv_put(VARCHAR, VARCHAR, BYTEA, BIGINT, INTEGER);
+DROP FUNCTION IF EXISTS kv_delete(VARCHAR, VARCHAR);
+
+-- 6. Update existing functions to use TEXT for parameters (cleaner)
 CREATE OR REPLACE FUNCTION get_next_revision(p_bucket_id UUID, p_key TEXT) 
 RETURNS BIGINT AS $$
 DECLARE
-    v_last_rev BIGINT;
+    v_next_rev BIGINT;
 BEGIN
-    SELECT revision INTO v_last_rev
-    FROM kv_entries
-    WHERE bucket_id = p_bucket_id AND key = p_key
-    ORDER BY revision DESC
-    LIMIT 1;
-
-    RETURN COALESCE(v_last_rev, 0) + 1;
+    -- Atomically increment and return the next revision
+    INSERT INTO kv_revision_sequences (bucket_id, key, current_revision)
+    VALUES (p_bucket_id, p_key, 1)
+    ON CONFLICT (bucket_id, key)
+    DO UPDATE SET current_revision = kv_revision_sequences.current_revision + 1
+    RETURNING current_revision INTO v_next_rev;
+    
+    RETURN v_next_rev;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -212,13 +218,19 @@ BEGIN
         RAISE EXCEPTION 'Bucket not found: %', p_bucket_name USING HINT = 'Create the bucket first.';
     END IF;
 
-    -- 2. Get latest revision
+    -- 2. Lock the key using the revision sequence row
+    INSERT INTO kv_revision_sequences (bucket_id, key, current_revision)
+    VALUES (v_bucket_id, p_key, 0)
+    ON CONFLICT (bucket_id, key)
+    DO UPDATE SET current_revision = kv_revision_sequences.current_revision;
+
+    -- 3. Get the actual latest revision from kv_entries (now that we have the lock)
     SELECT revision INTO v_actual_rev
     FROM kv_entries
     WHERE bucket_id = v_bucket_id AND key = p_key
     ORDER BY revision DESC LIMIT 1;
 
-    -- 3. Compare with expected revision
+    -- 4. Compare with expected revision
     -- If expected is 0, it means we expect the key NOT to exist
     IF (p_expected_rev = 0 AND v_actual_rev IS NOT NULL) OR 
        (p_expected_rev > 0 AND (v_actual_rev IS NULL OR v_actual_rev != p_expected_rev)) THEN
@@ -227,7 +239,7 @@ BEGIN
             USING ERRCODE = 'P0003';
     END IF;
 
-    -- 4. If match, perform regular kv_put
+    -- 5. If match, perform regular kv_put
     RETURN kv_put(p_bucket_name, p_key, p_value, p_ttl_seconds, p_max_history);
 END;
 $$ LANGUAGE plpgsql;

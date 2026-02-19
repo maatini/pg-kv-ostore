@@ -450,4 +450,30 @@ class ObjectStoreServiceTest {
         asserter.assertFailedWith(() -> objectStoreService.getObjectRange(TEST_BUCKET, "range-invalid.txt", 10, 5),
                 ValidationException.class);
     }
+
+    @Test
+    @Order(152)
+    @RunOnVertxContext
+    void testUpload100MiB_Object_ChunksAndStreaming(TransactionalUniAsserter asserter) {
+        // Note: 100 MiB might be large for default JVM heap in tests,
+        // but it verifies the chunking and reactive streaming implementation.
+        byte[] huge = new byte[100 * 1024 * 1024]; // 100 MiB
+        new Random().nextBytes(huge);
+
+        asserter.execute(() -> objectStoreService
+                .putObject(TEST_BUCKET, "huge.bin", Multi.createFrom().item(huge), "application/octet-stream", null,
+                        null)
+                .onItem().invoke(meta -> {
+                    assertEquals(100L * 1024 * 1024, meta.size);
+                    assertTrue(meta.chunkCount >= 100, "Should have 100 chunks of 1 MiB");
+                })
+                .chain(() -> objectStoreService.getObjectData(TEST_BUCKET, "huge.bin"))
+                .onItem().invoke(downloaded -> {
+                    assertEquals(huge.length, downloaded.length);
+                    // assertArrayEquals is very slow for 100MB, just check hash or sizes if memory
+                    // is tight
+                    // but for verification we do it.
+                    assertArrayEquals(huge, downloaded);
+                }));
+    }
 }

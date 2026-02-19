@@ -237,4 +237,30 @@ public class ObjectStoreResourceTest {
                                 .then()
                                 .statusCode(404);
         }
+
+        @Test
+        @Order(11)
+        @TestSecurity(user = "admin", roles = { "admin" })
+        public void testRangeRequest_206_PartialContent() {
+                byte[] data = new byte[1000];
+                for (int i = 0; i < 1000; i++)
+                        data[i] = (byte) (i % 256);
+
+                given()
+                                .contentType("application/octet-stream")
+                                .body(data)
+                                .when()
+                                .put("/api/v1/objects/buckets/{bucket}/objects/{name}", BUCKET_NAME, "range-test.bin")
+                                .then()
+                                .statusCode(200);
+
+                given()
+                                .header("Range", "bytes=100-199")
+                                .when()
+                                .get("/api/v1/objects/buckets/{bucket}/objects/{name}", BUCKET_NAME, "range-test.bin")
+                                .then()
+                                .statusCode(206)
+                                .header("Content-Range", containsString("bytes 100-199/"))
+                                .header("Content-Length", equalTo("100"));
+        }
 }

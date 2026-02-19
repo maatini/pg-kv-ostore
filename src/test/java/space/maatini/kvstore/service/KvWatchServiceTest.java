@@ -202,6 +202,30 @@ class KvWatchServiceTest {
         assertEquals(1, watchService.getActiveWatcherCount());
     }
 
+    @Test
+    void testWatch_UnsubscribeAndReconnect() {
+        // 1. Subscribe
+        watchService.subscribeBucket(mockSession, "test-bucket", 0);
+        assertEquals(1, watchService.getActiveWatcherCount());
+
+        // 2. Unsubscribe
+        watchService.unsubscribe(mockSession);
+        assertEquals(0, watchService.getActiveWatcherCount());
+
+        // 3. Reconnect
+        Session session2 = mock(Session.class);
+        RemoteEndpoint.Async async2 = mock(RemoteEndpoint.Async.class);
+        when(session2.getId()).thenReturn("test-session-2");
+        when(session2.isOpen()).thenReturn(true);
+        when(session2.getAsyncRemote()).thenReturn(async2);
+
+        watchService.subscribeBucket(session2, "test-bucket", 0);
+        assertEquals(1, watchService.getActiveWatcherCount());
+
+        watchService.unsubscribe(session2);
+        assertEquals(0, watchService.getActiveWatcherCount());
+    }
+
     private KvEntryDto.WatchEvent createTestEvent(String bucket, String key) {
         KvEntryDto.WatchEvent event = new KvEntryDto.WatchEvent();
         event.type = "PUT";
