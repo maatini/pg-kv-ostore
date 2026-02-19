@@ -39,17 +39,20 @@ Dieser Microservice ist für Szenarien konzipiert, in denen operative Einfachhei
 - **Buckets**: Erstellen, Löschen und Auflisten logischer Namensräume für Schlüssel
 - **CRUD-Operationen**: Put-, Get-, Delete-Operationen mit atomaren Updates
 - **Revisions-Historie**: Automatische Versionierung mit konfigurierbarer Historientiefe
+- **CAS (Compare-And-Swap)**: Atomare Updates basierend auf der erwarteten Revision
 - **TTL-Support**: Optionale Time-to-Live für automatischen Ablauf von Schlüsseln
 - **Watch**: Echtzeit-Änderungsbenachrichtigungen via WebSocket
 
 ### Object Store
 - **Buckets**: Logische Namensräume zur Organisation von Objekten
 - **Chunked Storage**: Automatische Aufteilung großer Dateien (konfigurierbare Chunk-Größe)
+- **Range Requests**: Unterstützung für partielle Downloads (HTTP Range Header)
 - **Streaming**: Effizienter Streaming-Upload und -Download
 - **Integrität**: SHA-256 Hash-Verifizierung
 - **Metadaten**: Content-Type, Beschreibung und benutzerdefinierte Header
 
 ### Zusätzliche Funktionen
+- **Multi-Mandantenfähigkeit**: Datenisolierung durch Row Level Security (RLS) via `X-Tenant-ID`
 - RESTful API mit OpenAPI/Swagger Dokumentation
 - WebSocket-Endpunkte zur Echtzeit-Überwachung
 - Health Checks (Liveness und Readiness Probes)
@@ -138,6 +141,15 @@ curl -X PUT http://localhost:8080/api/v1/kv/buckets/my-bucket/keys/my-key \
   -d '{"value": "Hallo Welt!", "base64": false}'
 ```
 
+#### Atomares Update (CAS)
+Führt ein Update nur durch, wenn die aktuelle Revision mit `expectedRevision` übereinstimmt.
+
+```bash
+curl -X PUT "http://localhost:8080/api/v1/kv/buckets/my-bucket/keys/my-key?expectedRevision=1" \
+  -H "Content-Type: application/json" \
+  -d '{"value": "Neuer Wert", "base64": false}'
+```
+
 #### Schlüssel abrufen (Get)
 ```bash
 curl http://localhost:8080/api/v1/kv/buckets/my-bucket/keys/my-key
@@ -176,10 +188,37 @@ curl -X PUT http://localhost:8080/api/v1/objects/buckets/my-files/objects/dokume
 curl -O http://localhost:8080/api/v1/objects/buckets/my-files/objects/dokument.pdf
 ```
 
+#### Partieller Download (Range Request)
+Laden Sie nur einen Teil der Datei herunter (z.B. die ersten 500 Bytes).
+
+```bash
+curl -H "Range: bytes=0-499" -o teil-dokument.pdf http://localhost:8080/api/v1/objects/buckets/my-files/objects/dokument.pdf
+```
+
 #### Objekt-Integrität prüfen
 ```bash
 curl http://localhost:8080/api/v1/objects/buckets/my-files/objects/dokument.pdf/verify
 ```
+
+## Multi-Mandantenfähigkeit (Multi-Tenancy)
+
+Der Service unterstützt vollständige Datenisolierung zwischen Mandanten durch Row Level Security (RLS) auf Datenbankebene.
+
+Um auf einen spezifischen Mandantenbereich zuzugreifen, senden Sie einfach den `X-Tenant-ID` Header mit jeder Anfrage:
+
+```bash
+# Daten für Tenant A speichern
+curl -X PUT http://localhost:8080/api/v1/kv/buckets/shared-bucket/keys/config \
+  -H "X-Tenant-ID: tenant-a" \
+  -d '{"value": "Config A"}'
+
+# Daten für Tenant B speichern (selber Bucket-Name, aber isoliert)
+curl -X PUT http://localhost:8080/api/v1/kv/buckets/shared-bucket/keys/config \
+  -H "X-Tenant-ID: tenant-b" \
+  -d '{"value": "Config B"}'
+```
+
+*Hinweis: Wenn kein Header gesendet wird, wird der Standard-Mandant (`default`) verwendet.*
 
 ## Konfiguration
 
