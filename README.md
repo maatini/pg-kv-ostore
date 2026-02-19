@@ -23,7 +23,7 @@ Dieser Microservice ist für Szenarien konzipiert, in denen operative Einfachhei
 3.  **Integrierte erweiterte Funktionen**:
     *   **Revisions-Historie**: Automatische Nachverfolgung von Wertänderungen über die Zeit (z.B. für Konfigurationsversionierung oder Audit-Logs).
     *   **Echtzeit-Überwachung (Watch)**: Empfangen Sie WebSocket-Push-Benachrichtigungen, wenn sich bestimmte Schlüssel oder Buckets ändern, was reaktive UIs ohne Polling ermöglicht.
-    *   **Intelligentes Chunking**: Teilt große Dateien automatisch in verwaltete Blöcke auf, wodurch Objekte gespeichert werden können, die größer sind als die Limits von Postgres.
+    *   **Intelligentes Chunking & Deduplikation**: Teilt große Dateien in Blöcke auf und speichert identische Blöcke (über Objekte hinweg) nur einmal, was massiv Speicherplatz spart.
 
 4.  **Cloud-Native & Serverless Ready**:
     *   Dank der Quarkus Native-Kompilierung startet der Service in Millisekunden und hat einen winzigen Speicherbedarf (<50MB RSS), was ihn kosteneffizient für Scale-to-Zero-Umgebungen macht.
@@ -45,6 +45,7 @@ Dieser Microservice ist für Szenarien konzipiert, in denen operative Einfachhei
 
 ### Object Store
 - **Buckets**: Logische Namensräume zur Organisation von Objekten
+- **Deduplicated Storage**: Inhaltsadressierbare Speicherung (CAS) von Chunks zur Vermeidung von Redundanz
 - **Chunked Storage**: Automatische Aufteilung großer Dateien (konfigurierbare Chunk-Größe)
 - **Range Requests**: Unterstützung für partielle Downloads (HTTP Range Header)
 - **Streaming**: Effizienter Streaming-Upload und -Download
@@ -70,6 +71,7 @@ Dieser Microservice ist für Szenarien konzipiert, in denen operative Einfachhei
 | **KV Store** | Max. Historie | 100 Revisionen | Ja | Anzahl der gespeicherten Versionen pro Key. |
 | **Object Store** | Max. Objektgröße | 1 GB | Ja | Applikationslimit (durch Chunking theoretisch nur durch Festplattenspeicher begrenzt). |
 | **Object Store** | Chunk Größe | 1 MB | Ja | Größe der Einzelblöcke, in die Dateien zerlegt werden. |
+| **Object Store** | Deduplikation | Aktiv | Nein | Content-addressable Storage für identische Chunks. |
 | **Allgemein** | Transaktions-Isolation | Read Committed | (DB-Level) | Standard PostgreSQL Isolation Level. |
 
 
@@ -252,7 +254,7 @@ Die Konfiguration erfolgt über `application.properties` oder Umgebungsvariablen
 
 ## Testen
 
-Der Service verfügt über eine umfassende Testsuite mit **181 automatisierten Tests**, die sowohl Unit- als auch Integrationstests abdecken.
+Der Service verfügt über eine umfassende Testsuite mit **182 automatisierten Tests**, die sowohl Unit- als auch Integrationstests abdecken.
 
 ```bash
 # Unit- und Integrationstests ausführen
@@ -364,10 +366,6 @@ graph TD
         R2[Object Resources]
         W1[WebSocket Endpoints]
     end
- - [x] Execute benchmarks <!-- id: 3 -->
-    - [x] Run `SimpleBenchmarkTest` <!-- id: 4 -->
-- [x] Update performance data in `README.md` <!-- id: 5 -->
-- [x] Update `walkthrough.md` <!-- id: 6 -->
     subgraph "Service Layer (Mutiny & Vert.x)"
         S1[KV Service]
         S2[Object Store Service]
@@ -376,7 +374,7 @@ graph TD
 
     subgraph "Persistence Layer (Hibernate Reactive)"
         E1[KvBucket/KvEntry]
-        E2[ObjMetadata/ObjChunk]
+        E2[ObjMetadata/ObjSharedChunk/ObjMetadataChunk]
     end
 
     subgraph "Database Layer"

@@ -155,28 +155,8 @@ public class KvService {
                                     .setParameter("ttl", request.ttlSeconds != null ? request.ttlSeconds : -1L)
                                     .setParameter("max_history", -1)
                                     .getSingleResult()
-                                    .map(result -> {
-                                        try {
-                                            io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(
-                                                    result);
-                                            KvEntry entry = new KvEntry();
-                                            entry.id = java.util.UUID.fromString(obj.getString("id"));
-                                            entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
-                                            entry.key = key;
-                                            entry.value = finalValue;
-                                            entry.revision = obj.getLong("revision");
-                                            entry.operation = Operation.PUT;
-                                            entry.tenantId = tenantContext.getTenantId();
-                                            entry.createdAt = OffsetDateTime.parse(obj.getString("created_at"));
-                                            String expiresAtStr = obj.getString("expires_at");
-                                            if (expiresAtStr != null) {
-                                                entry.expiresAt = OffsetDateTime.parse(expiresAtStr);
-                                            }
-                                            return entry;
-                                        } catch (Exception e) {
-                                            throw new RuntimeException("Failed to parse DB result", e);
-                                        }
-                                    });
+                                    .map(result -> mapResultToEntry(result, key, finalValue, Operation.PUT,
+                                            tenantContext.getTenantId()));
                         });
                     });
                 });
@@ -222,28 +202,8 @@ public class KvService {
                                     .setParameter("ttl", request.ttlSeconds != null ? request.ttlSeconds : -1L)
                                     .setParameter("max_history", -1)
                                     .getSingleResult()
-                                    .map(result -> {
-                                        try {
-                                            io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(
-                                                    result);
-                                            KvEntry entry = new KvEntry();
-                                            entry.id = java.util.UUID.fromString(obj.getString("id"));
-                                            entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
-                                            entry.key = key;
-                                            entry.value = finalValue;
-                                            entry.revision = obj.getLong("revision");
-                                            entry.operation = Operation.PUT;
-                                            entry.tenantId = tenantContext.getTenantId();
-                                            entry.createdAt = OffsetDateTime.parse(obj.getString("created_at"));
-                                            String expiresAtStr = obj.getString("expires_at");
-                                            if (expiresAtStr != null) {
-                                                entry.expiresAt = OffsetDateTime.parse(expiresAtStr);
-                                            }
-                                            return entry;
-                                        } catch (Exception e) {
-                                            throw new RuntimeException("Failed to parse DB result", e);
-                                        }
-                                    })
+                                    .map(result -> mapResultToEntry(result, key, finalValue, Operation.PUT,
+                                            tenantContext.getTenantId()))
                                     .onFailure().transform(t -> {
                                         if (t.getMessage().contains("P0003")
                                                 || t.getMessage().contains("CAS Failure")) {
@@ -294,24 +254,8 @@ public class KvService {
                         .setParameter("bucket_name", bucketName)
                         .setParameter("key", key)
                         .getSingleResult()
-                        .map(result -> {
-                            try {
-                                io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(
-                                        result.toString());
-                                KvEntry entry = new KvEntry();
-                                entry.id = java.util.UUID.fromString(obj.getString("id"));
-                                entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
-                                entry.key = key;
-                                entry.value = null;
-                                entry.revision = obj.getLong("revision");
-                                entry.operation = Operation.DELETE;
-                                entry.createdAt = OffsetDateTime.parse(obj.getString("created_at"));
-                                LOG.debugf("Deleted key: %s/%s (revision=%d)", bucketName, key, entry.revision);
-                                return entry;
-                            } catch (Exception e) {
-                                throw new RuntimeException("Failed to parse DB result or Key not found", e);
-                            }
-                        })
+                        .map(result -> mapResultToEntry(result.toString(), key, null, Operation.DELETE,
+                                tenantContext.getTenantId()))
                         .onFailure().transform(t -> {
                             if (t.getMessage().contains("P0002") || t.getMessage().contains("Key not found")) {
                                 return new NotFoundException("Key not found: " + bucketName + "/" + key);
@@ -355,5 +299,33 @@ public class KvService {
                     }
                     return Uni.createFrom().voidItem();
                 });
+    }
+
+    private KvEntry mapResultToEntry(String json, String key, byte[] value, Operation operation, String tenantId) {
+        try {
+            io.vertx.core.json.JsonObject obj = new io.vertx.core.json.JsonObject(json);
+            KvEntry entry = new KvEntry();
+            entry.id = java.util.UUID.fromString(obj.getString("id"));
+            entry.bucketId = java.util.UUID.fromString(obj.getString("bucket_id"));
+            entry.key = key;
+            entry.value = value;
+            entry.revision = obj.getLong("revision");
+            entry.operation = operation;
+            entry.tenantId = tenantId;
+
+            String createdAtStr = obj.getString("created_at");
+            if (createdAtStr != null) {
+                entry.createdAt = OffsetDateTime.parse(createdAtStr);
+            }
+
+            String expiresAtStr = obj.getString("expires_at");
+            if (expiresAtStr != null) {
+                entry.expiresAt = OffsetDateTime.parse(expiresAtStr);
+            }
+            return entry;
+        } catch (Exception e) {
+            LOG.errorf("Failed to map SQL result JSON to KvEntry. Key: %s, JSON: %s", key, json);
+            throw new RuntimeException("Data mapping error: Failed to parse storage result", e);
+        }
     }
 }
